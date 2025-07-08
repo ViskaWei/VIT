@@ -1,0 +1,13 @@
+{
+    "python.defaultInterpreterPath": "/srv/local/tmp/swei20/miniconda3/envs/viska-torch-3/bin/python",
+    "python.testing.unittestArgs": [
+        "-v",
+        "-s",
+        "./tests",
+        "-p",
+        "test_*.py"
+    ],
+    "python.testing.pytestEnabled": false,
+    "python.testing.unittestEnabled": true,
+    "python.analysis.extraPaths": ["${workspaceFolder}/src"],
+}

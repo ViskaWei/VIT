@@ -3,12 +3,34 @@ import torch
 import torch.nn as nn
 from transformers import ViTForImageClassification
 
+# class MyViT(ViTForImageClassification, BaseModel):
 class MyViT(ViTForImageClassification):
+
     def __init__(self, config):
         super().__init__(config)
+        # super(BaseModel, self).__init__(model_name='ViT', loss_name='train')
         self.config = config
         self.vit.embeddings = MyEmbeddings(config)
         self.init_weights()   # Initialize weights
+        self.loss_name = 'train'  # Set the loss name for logging
+        self.name = 'ViT'  # Set the model name for logging
+
+    # def compute_loss(self, outputs, labels):
+    #     return outputs.loss
+    #     # """
+    #     # Compute the loss for the model outputs and labels.
+    #     # """
+    #     # if self.config.task == 'cls':
+    #     #     loss = nn.CrossEntropyLoss()(outputs.logits.view(-1, self.config.num_labels), labels.view(-1))
+    #     #     return loss
+    #     # elif self.config.task == 'reg':
+    #     #     loss = nn.MSELoss()(outputs.logits.view(-1), labels.view(-1))
+    #     #     return loss
+    #     # else:
+    #     #     raise ValueError(f"Unsupported task: {self.config.task}")
+        
+    # def log_outputs(self, outputs, log_fn = print, stage=''):
+    #     log_fn(f'{self.loss_name}_loss', outputs.loss.item(), stage=stage)
 
 class MyCNN1DPatchEmbeddings(nn.Module):
     def __init__(self, config):

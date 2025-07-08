@@ -1,27 +1,17 @@
 model:
-  # ViT 参数
-  image_size: 4096    # 光谱长度
+  name: vit
+  image_size: 4096    
   patch_size: 100
   hidden_size: 128
   num_hidden_layers: 6
   num_attention_heads: 8
-  num_labels: 2     # 分类类别数
+  num_labels: 2    
   stride_ratio: 1
   proj_fn: 'SW'
 
-
-# model:
-#   name: blindspot
-#   num_layers: 9
-#   embed_dim: 48
-#   kernel_size: 25
-#   input_sigma: true
-#   blindspot: true
-#   use_bn: true
-
 train:
   batch_size: 128
-  ep: 1
+  ep: 100
   debug: 0
   workers: 24
 
@@ -39,7 +29,7 @@ data:
   file_path: '/datascope/subaru/user/swei20/data/bosz50000/test/mag215/train_100k/dataset.h5'
   val_path: '/datascope/subaru/user/swei20/data/bosz50000/mag215/train_1k/dataset.h5'
   test_path: '/datascope/subaru/user/swei20/data/bosz50000/mag215/val_1k/dataset.h5'
-  num_samples: 1000
+  num_samples: 100000
   num_test_samples: 1000
   param_idx: 1  
 

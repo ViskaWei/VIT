@@ -127,7 +127,7 @@ class SingleSpectrumNoiseDataset(Dataset):
         
 class BaseSpecDataset(MaskMixin, NoiseMixin, BaseDataset):   
     def get_path_and_samples(self, stage):
-        if stage == 'fit' or stage is None:
+        if stage == 'fit' or stage == 'train' or stage is None:
             return self.file_path, self.num_samples
         else:
             load_path = self.test_path if stage == 'test' else self.val_path
@@ -188,6 +188,7 @@ class BaseSpecDataset(MaskMixin, NoiseMixin, BaseDataset):
         self.am = df['a_M'].values
         self.cm = df['C_M'].values
         self.logg = df['log_g'].values
+        self.logg2 = self.logg < 2.5
         if load_df: self.df = df
         # self.gd_labels = self.logg < 2.5
             
@@ -295,13 +296,14 @@ class BaseModel(nn.Module, ABC):
     @abstractmethod
     def log_outputs(self, outputs, log_fn = print, stage=''):
         log_fn(f'{self.loss_name}_loss', outputs['loss'])
+
+
 #endregion MODEL-----------------------------------------------------------
 
 class BaseLightningModule(L.LightningModule):
-    def __init__(self, model: BaseModel = None, data_module = None, config={}):
+    def __init__(self, model: BaseModel = None,config={}):
         super().__init__()
         self.model = model
-        self.data_module = data_module   # processed data
         self.loss_name = model.loss_name 
         self.callbacks = []
         self.config = config
