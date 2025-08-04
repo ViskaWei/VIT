@@ -1,0 +1,52 @@
+Repository Overview
+The project centers on building and training Vision Transformer (ViT)–style models for spectral data using PyTorch Lightning and Hugging Face’s transformers. It is organized as follows:
+
+| Path       | Purpose                                                                                                                      |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `src/`     | Core Python modules: dataset abstractions, model definitions, training loops, plotting utilities, and miscellaneous helpers. |
+| `scripts/` | CLI entry points for launching experiments.                                                                                  |
+| `configs/` | YAML configuration files describing model hyperparameters, data paths, optimization, etc.                                    |
+| `evals/`   | Jupyter notebooks and other evaluation artifacts.                                                                            |
+| `run.sh`   | Shell script that activates an environment and triggers the training script.                                                 |
+| `wandb.md` | Stores a W\&B API key (used for logging if enabled).                                                                         |
+
+# Key Components
+
+## 1. Training Workflow
+
+* **Entry point:** `scripts/run.py` parses command-line arguments, loads a YAML config, and instantiates `Experiment`.
+* **Experiment** (in `src/vit.py` or `src/blindspot.py`) combines a `LightningModule`, a `DataModule`, and a `Trainer`:
+
+  * Builds model (`ViTLModule`) and dataset (`ViTDataModule`).
+  * Optionally sets up Weights & Biases logging.
+  * Executes training and testing.
+
+## 2. Data Handling
+
+* **`basemodule.py`** defines reusable mixins and base classes:
+
+  * `Configurable` extracts constructor arguments from a config dictionary.
+  * `BaseDataset`, `BaseDataModule` manage I/O from HDF5 files, masking/noise routines, and train/val/test splits.
+  * `NoiseMixin`, `MaskMixin` encapsulate noise injection and masking logic.
+* **`blindspot.py`** and **`vit.py`** implement dataset subclasses tailored to particular experiments.
+
+## 3. Models
+
+* **`model.py`** wraps Hugging Face’s `ViTForImageClassification`:
+
+  * Custom patch embeddings (`MyCNN1DPatchEmbeddings`, `MyWindowPatchEmbeddings`) for 1-D spectra.
+  * `MyEmbeddings` supports different positional encodings.
+* **`vit.py`** constructs a `ViTLModule` that:
+
+  * Uses the custom `MyViT` model.
+  * Logs losses/metrics (`Accuracy` from `torchmetrics`) during train/val/test.
+
+## 4. Training Logic
+
+* **`train.py`** (alternative CLI) shows a full command-line interface for experimentation without config files.
+* **`BaseLightningModule`** & **`BaseTrainer`** (in `basemodule.py`) wrap PyTorch Lightning conveniences (checkpointing, early stopping, optimizer/scheduler setup via `OptModule`).
+
+## 5. Plotting & Evaluation
+
+* **`plotter.py`** produces spectral plots, SNR comparisons, and equivalent-width analyses using `matplotlib`/`seaborn`.
+* **`utils.py`** offers a large collection of helpers for spectral line manipulation, noise generation, SVD denoising, and various physical conversions.
