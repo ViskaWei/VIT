@@ -3,7 +3,7 @@ import pytorch_lightning as pl
 from pca_warm import Tokenizer1DConfig, WarmStartConfig, pca_warm_start_model
 
 class PCAWarmStartCallback(pl.Callback):
-    \"\"\"Run PCA warm-start at the beginning of training using the train dataloader.\"\"\"
+    """Run PCA warm-start at the beginning of training using the train dataloader."""
     def __init__(self, tokenizer_cfg: Tokenizer1DConfig, warm_cfg: WarmStartConfig, 
                  dataloader_max_batches: int = 50, center: bool = True, whiten: bool = False):
         super().__init__()

@@ -7,7 +7,7 @@ def _center_gram(K: torch.Tensor) -> torch.Tensor:
     return K - one_n @ K - K @ one_n + one_n @ K @ one_n
 
 def linear_CKA(X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
-    \"\"\"Linear CKA between (n,d1) and (n,d2). Returns scalar tensor.\"\"\"
+    """Linear CKA between (n,d1) and (n,d2). Returns scalar tensor."""
     if X.ndim > 2: X = X.flatten(1)
     if Y.ndim > 2: Y = Y.flatten(1)
     Kx = X @ X.T
