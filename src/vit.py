@@ -12,9 +12,10 @@ from src.callbacks_pca_warm import PCAWarmStartCallback, CKAProbeCallback
 from src.utils import make_dummy_spectra
 
 
-SAVE_DIR='/datascope/subaru/user/swei20/wandb'
-SAVE_PATH = '/home/swei20/SirenSpec/checkpoints'
-MASK_PATH = '/datascope/subaru/user/swei20/model/bosz50000_mask.npy'
+# Use local paths to be portable across environments
+SAVE_DIR='./wandb'
+SAVE_PATH = './checkpoints'
+MASK_PATH = './bosz50000_mask.npy'
 
 #region --DATA-----------------------------------------------------------
 class TestDataset(BaseSpecDataset):
@@ -250,7 +251,7 @@ class SpecTrainer():
         p = (config.get('pca') or {})
         if p.get('warm', False):
             self.trainer.callbacks.append(PCAWarmStartCallback(
-                attn_module_path=p.get('attn_path', 'model.encoder.layers.0.attn'),
+                attn_module_path=p.get('attn_path', 'model.vit.encoder.layer.0.attention'),
                 r=int(p.get('r', 32)),
                 robust=bool(p.get('robust', False)),
                 kernel=p.get('kernel', None),
@@ -260,7 +261,7 @@ class SpecTrainer():
             ))
         if p.get('cka', False):
             self.trainer.callbacks.append(CKAProbeCallback(
-                attn_module_path=p.get('attn_path', 'model.encoder.layers.0.attn'),
+                attn_module_path=p.get('attn_path', 'model.vit.encoder.layer.0.attention'),
                 r=int(p.get('r', 32)),
                 every_n_epochs=int(p.get('cka_every', 1)),
                 kernel=p.get('cka_kernel', 'linear'),
