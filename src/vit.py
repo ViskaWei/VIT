@@ -1,10 +1,6 @@
-import h5py
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
 from torchmetrics import Accuracy, MeanAbsoluteError, R2Score
-
 
 from src.basemodule import BaseLightningModule, BaseTrainer, BaseSpecDataset, BaseDataModule
 from src.callbacks_pca_warm import PCAWarmStartCallback, CKAProbeCallback
@@ -15,9 +11,16 @@ from src.utils import make_dummy_spectra
 # Use local paths to be portable across environments
 SAVE_DIR='./wandb'
 SAVE_PATH = './checkpoints'
-MASK_PATH = './bosz50000_mask.npy'
+# MASK_PATH = './bosz50000_mask.npy'
 
 #region --DATA-----------------------------------------------------------
+def _normalize_task(config):
+    """Return ('cls'|'reg') from config supporting legacy keys."""
+    m = (config.get('model', {}) or {})
+    task = (m.get('task_type') or m.get('task') or 'cls').lower()
+    if task in ('classification', 'cls', 'class'):
+        return 'cls'
+    return 'reg'
 class TestDataset(BaseSpecDataset):
     def __init__(self, param_idx=1, task='classification', **kwargs):
         super().__init__(**kwargs)
@@ -28,7 +31,7 @@ class TestDataset(BaseSpecDataset):
     def from_config(cls, config):
         d = super().from_config(config)
         d.param_idx = (config.get('data', {}) or {}).get('param_idx', getattr(d, 'param_idx', 1))
-        d.task = (config.get('model', {}) or {}).get('task', 'classification').lower()
+        d.task = 'regression' if _normalize_task(config) == 'reg' else 'classification'
         return d
         
     def load_data(self, stage=None):
@@ -100,12 +103,12 @@ class RegSpecDataset(BaseSpecDataset):
 class ViTDataModule(BaseDataModule):
     @classmethod
     def from_config(cls, config, test_data=False):
-        task = (config.get('model', {}) or {}).get('task', 'classification').lower()
+        task = _normalize_task(config)
         if test_data:
             dataset_cls = TestDataset
             print('Using Test Dataset')
         else:
-            if task == 'regression':
+            if task == 'reg':
                 dataset_cls = RegSpecDataset
                 print('Using RegSpec Dataset (regression)')
             else:
@@ -118,57 +121,7 @@ class ViTDataModule(BaseDataModule):
 #endregion --DATAMODULE-----------------------------------------------------------
 
 #region MODEL-----------------------------------------------------------
-from transformers import ViTModel, ViTConfig
-from src.model import MyViT
-def get_vit_model(config):
-    """
-    Create a Vision Transformer model based on the provided configuration.
-    Args:
-        config (dict): Configuration dictionary containing model parameters.
-        num_classes (int): Number of output classes for classification tasks.
-    Returns:
-        MyViT: Instance of the Vision Transformer model.
-    """
-    vit_config = get_model_config(config)
-    # Initialize the model with the ViTConfig
-    return MyViT(vit_config)
-
-def get_model_config(config):
-    """
-    Create a ViTConfig object based on the provided configuration.
-    Args:
-        config (dict): Configuration dictionary containing model parameters.
-        num_classes (int): Number of output classes for classification tasks.
-        image_size (int): Size of the input images.
-    Returns:
-        ViTConfig: Config object for the Vision Transformer model.
-    """
-    vit_config = ViTConfig(
-        task_type=config['model']['task_type'],
-        image_size=config['model']['image_size'],
-        patch_size=config['model']['patch_size'],
-        num_channels=1,
-        hidden_size=config['model']['hidden_size'],
-        num_hidden_layers=config['model']['num_hidden_layers'],
-        num_attention_heads=config['model']['num_attention_heads'],
-        intermediate_size=4 * config['model']['hidden_size'],
-        stride_ratio=config['model']['stride_ratio'],
-        proj_fn=config['model']['proj_fn'],
-
-        hidden_act="gelu",
-        hidden_dropout_prob=0.1,
-        attention_probs_dropout_prob=0.1,
-        initializer_range=0.02,
-        layer_norm_eps=1e-12,
-        is_encoder_decoder=False,
-        use_mask_token=False,
-        qkv_bias=True,
-        num_labels=config['model']['num_labels'] or 1,
-      # noise_level=config['noise']['noise_level'],
-        # learning_rate=config['opt']['lr'],
-    )
-    return vit_config
-
+from src.model import get_model
 
 #region --TRAINER-----------------------------------------------------------
 class ViTLModule(BaseLightningModule):
@@ -176,10 +129,7 @@ class ViTLModule(BaseLightningModule):
         model = model or self.get_model(config)
         super().__init__(model=model, config=config)
         self.save_hyperparameters()
-        self.loss_name = 'train'  # Set the loss name for logging
-        self.model.loss_name = self.loss_name  # Ensure the model has the loss name set
-        self.task_type = config['model']['task_type']
-        
+        self.task_type = _normalize_task(config)
         if self.task_type == 'cls':
             self.accuracy = Accuracy(task='multiclass', num_classes=config['model']['num_labels'])
         elif self.task_type == 'reg':
@@ -187,28 +137,24 @@ class ViTLModule(BaseLightningModule):
             self.r2 = R2Score()
 
     def get_model(self, config):
-        return get_vit_model(config)
+        return get_model(config)
 
     def forward(self, flux, labels, loss_only=True):
-        """
-        Forward without passing labels to HF; compute loss explicitly.
-        - Classification: CrossEntropyLoss
-        - Regression: L1Loss (MAE)
-        """
+        """Forward wrapper returning loss or full outputs from HF model."""
         outputs = self.model(flux,labels=labels)
         return outputs.loss if loss_only else outputs
         
     def training_step(self, batch, batch_idx):
         flux, _, labels = batch
         loss = self.forward(flux, labels, loss_only=True)
-        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log(f'{self.loss_name}_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
     
     def _shared_eval_step(self, batch, prefix):
         flux, _, labels = batch
         outputs = self.forward(flux, labels, loss_only=False)
         loss = outputs.loss
-        self.log(f'{prefix}_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log(f'{prefix}_{self.loss_name}_loss', loss, on_step=False, on_epoch=True)
         if self.task_type == 'cls':
             acc = self.accuracy(outputs.logits, labels)
             self.log(f'{prefix}_acc', acc, on_step=False, on_epoch=True, prog_bar=True)
@@ -234,38 +180,34 @@ class SpecTrainer():
     def __init__(self, config, logger, num_gpus=None, sweep=False, monitor_name='acc', monitor_mode='max') -> None:
         if sweep: num_gpus = 1
         patience = 100 if sweep else 500
-        task_type = config['model']['task_type']
-        if task_type == 'classification':
-            monitor_name = 'acc'
-            monitor_mode = 'max'
-            filename_suffix = '{acc_valid:.0f}'
-        else:  # regression
-            monitor_name = 'mae'
-            monitor_mode = 'min'
-            filename_suffix = '{mae:.2f}'
+        task_type = _normalize_task(config)
+        if task_type == 'cls':
+            monitor_name, monitor_mode, filename_suffix = 'acc', 'max', '{acc_valid:.0f}'
+        else:
+            monitor_name, monitor_mode, filename_suffix = 'mae', 'min', '{mae:.2f}'
 
         self.trainer = BaseTrainer(config=config.get('train', {}), logger=logger, num_gpus=num_gpus, sweep=sweep)
         # accelerator, devices = self.select_device(num_gpus)
         
 
-        p = (config.get('pca') or {})
-        if p.get('warm', False):
-            self.trainer.callbacks.append(PCAWarmStartCallback(
-                attn_module_path=p.get('attn_path', 'model.vit.encoder.layer.0.attention'),
-                r=int(p.get('r', 32)),
-                robust=bool(p.get('robust', False)),
-                kernel=p.get('kernel', None),
-                nystrom_m=int(p.get('nystrom_m', 256)),
-                whiten=bool(p.get('whiten', False)),
-                trigger_epoch=0,
-            ))
-        if p.get('cka', False):
-            self.trainer.callbacks.append(CKAProbeCallback(
-                attn_module_path=p.get('attn_path', 'model.vit.encoder.layer.0.attention'),
-                r=int(p.get('r', 32)),
-                every_n_epochs=int(p.get('cka_every', 1)),
-                kernel=p.get('cka_kernel', 'linear'),
-            ))
+        # p = (config.get('pca') or {})
+        # if p.get('warm', False):
+        #     self.trainer.callbacks.append(PCAWarmStartCallback(
+        #         attn_module_path=p.get('attn_path', 'model.vit.encoder.layer.0.attention'),
+        #         r=int(p.get('r', 32)),
+        #         robust=bool(p.get('robust', False)),
+        #         kernel=p.get('kernel', None),
+        #         nystrom_m=int(p.get('nystrom_m', 256)),
+        #         whiten=bool(p.get('whiten', False)),
+        #         trigger_epoch=0,
+        #     ))
+        # if p.get('cka', False):
+        #     self.trainer.callbacks.append(CKAProbeCallback(
+        #         attn_module_path=p.get('attn_path', 'model.vit.encoder.layer.0.attention'),
+        #         r=int(p.get('r', 32)),
+        #         every_n_epochs=int(p.get('cka_every', 1)),
+        #         kernel=p.get('cka_kernel', 'linear'),
+        #     ))
         
         if not sweep: 
             checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(dirpath= SAVE_PATH, filename='{epoch}-{acc_valid:.0f}', save_top_k=1, monitor=f'val_{monitor_name}', mode=monitor_mode)

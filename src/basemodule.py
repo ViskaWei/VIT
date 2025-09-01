@@ -478,7 +478,8 @@ class OptModule():
         opt_type = config.get('type', 'adam')
         weight_decay = config.get('weight_decay', 0)
         loss_name = config.get('loss_name', 'train')
-        monitor_name = loss_name + '_loss'
+        # Align with validation logging in ViTLModule: 'val_{loss_name}_loss'
+        monitor_name = f"val_{loss_name}_loss"
         if 'lr_sch' in config:
             lr_scheduler_name = config['lr_sch']
             kwargs = {k: v for k, v in config.items() if k not in ['lr', 'type', 'lr_sch','weight_decay', 'loss_name']}
@@ -494,4 +495,3 @@ class OptModule():
             raise ValueError(f"Unknown scheduler: {self.lr_scheduler_name}")
         scheduler = self.lr_schedulers[self.lr_scheduler_name](optimizer, **self.kwargs)
         return {"optimizer": optimizer, "lr_scheduler": scheduler, 'monitor': f'{self.monitor_name}'}
-
