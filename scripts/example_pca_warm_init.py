@@ -17,10 +17,10 @@ try:
 except Exception:
     _HF = False
 
-from tokenizers_1d import Tokenizer1DConfig
-from pca_warm import WarmStartConfig, pca_warm_start_model
+from src.tokenizers_1d import Tokenizer1DConfig
+from src.pca_warm import WarmStartConfig, pca_warm_start_model
 
-def make_dummy_spectra(n=512, length=2000, seed=0):
+def make_dummy_spectra(n=512, length=4096, seed=0):
     g = torch.Generator().manual_seed(seed)
     base = torch.randn(n, length, generator=g) * 0.05
     centers = [300, 600, 1200, 1600]
@@ -31,7 +31,7 @@ def make_dummy_spectra(n=512, length=2000, seed=0):
     return base
 
 def main():
-    spectra = make_dummy_spectra(512, 2000)
+    spectra = make_dummy_spectra(512, 4096)
     dl = DataLoader(TensorDataset(spectra), batch_size=32, shuffle=True)
 
     if not _HF:

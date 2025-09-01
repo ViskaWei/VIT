@@ -1,0 +1,1 @@
+torch numpy h5py lightning transformers, matplotlib, wandb, scipy, pandas

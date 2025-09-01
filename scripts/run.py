@@ -28,10 +28,10 @@ def parse_args():
     return parser.parse_args()
 
 def main(args: argparse.Namespace) -> None:
-    config = load_config(args.config or 'configs/blindspot.yaml')
+    config = load_config(args.config or 'configs/vit.yaml')
     config['train']['gpus'] = args.gpu
     config['train']['debug'] = args.debug
-    Experiment(config, use_wandb=args.wandb, sweep=False, ckpt_path=args.ckpt).run()
+    Experiment(config, use_wandb=args.wandb, sweep=False, ckpt_path=args.ckpt, test_data=True).run()
 
 if __name__ == "__main__":
     args = parse_args()

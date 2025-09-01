@@ -1,22 +1,36 @@
+pca:
+  warm: true
+  attn_path: "model.encoder.layers.0.attn"
+  r: 32
+  whiten: true
+  robust: false
+  kernel: null       # 或 'rbf'
+  nystrom_m: 256
+  cka: true
+  cka_every: 1
+  cka_kernel: 'linear'
+
+  
 model:
   name: vit
+  task_type: reg
+  num_labels: 2  
   image_size: 4096    
-  patch_size: 100
-  hidden_size: 128
-  num_hidden_layers: 6
-  num_attention_heads: 8
-  num_labels: 2    
+  patch_size: 16
+  hidden_size: 32
+  num_hidden_layers: 3
+  num_attention_heads: 2
   stride_ratio: 1
   proj_fn: 'SW'
 
 train:
-  batch_size: 128
-  ep: 100
+  batch_size: 64
+  ep: 10
   debug: 0
   workers: 24
 
 loss: 
-  name: 'T1'
+  name: 'mae'
 
 opt:
   type: 'adam'
@@ -29,7 +43,7 @@ data:
   file_path: '/datascope/subaru/user/swei20/data/bosz50000/test/mag215/train_100k/dataset.h5'
   val_path: '/datascope/subaru/user/swei20/data/bosz50000/mag215/train_1k/dataset.h5'
   test_path: '/datascope/subaru/user/swei20/data/bosz50000/mag215/val_1k/dataset.h5'
-  num_samples: 100000
+  num_samples: 1000
   num_test_samples: 1000
   param_idx: 1  
 

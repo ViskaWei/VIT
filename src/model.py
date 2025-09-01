@@ -1,50 +1,62 @@
 import math
 import torch
 import torch.nn as nn
-from transformers import ViTForImageClassification
+from transformers import ViTPreTrainedModel, ViTModel, ViTConfig
+from transformers.modeling_outputs import SequenceClassifierOutput
 
-# class MyViT(ViTForImageClassification, BaseModel):
-class MyViT(ViTForImageClassification):
-
+class MyViT(ViTPreTrainedModel):
+    config_class = ViTConfig
+    
     def __init__(self, config):
         super().__init__(config)
-        # super(BaseModel, self).__init__(model_name='ViT', loss_name='train')
         self.config = config
+        self.vit = ViTModel(config)
         self.vit.embeddings = MyEmbeddings(config)
-        self.init_weights()   # Initialize weights
-        self.loss_name = 'train'  # Set the loss name for logging
-        self.name = 'ViT'  # Set the model name for logging
-
-    # def compute_loss(self, outputs, labels):
-    #     return outputs.loss
-    #     # """
-    #     # Compute the loss for the model outputs and labels.
-    #     # """
-    #     # if self.config.task == 'cls':
-    #     #     loss = nn.CrossEntropyLoss()(outputs.logits.view(-1, self.config.num_labels), labels.view(-1))
-    #     #     return loss
-    #     # elif self.config.task == 'reg':
-    #     #     loss = nn.MSELoss()(outputs.logits.view(-1), labels.view(-1))
-    #     #     return loss
-    #     # else:
-    #     #     raise ValueError(f"Unsupported task: {self.config.task}")
+        self.task_type = config.task_type
+        if self.task_type == 'cls': # classification
+            self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+        elif self.task_type == 'reg':  # regression
+            self.regressor = nn.Linear(config.hidden_size, 1)
         
-    # def log_outputs(self, outputs, log_fn = print, stage=''):
-    #     log_fn(f'{self.loss_name}_loss', outputs.loss.item(), stage=stage)
+        self.init_weights()
+        self.loss_name = 'train'
+        self.name = f'ViT_p{config.patch_size}_h{config.hidden_size}_l{config.num_hidden_layers}_a{config.num_attention_heads}_s{config.stride_ratio}_p{config.proj_fn}'
 
-class MyCNN1DPatchEmbeddings(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.image_size = config.image_size # spectra length = 2000
-        self.patch_size = config.patch_size # patch_size = 100
-        self.num_channels = 1
-        self.stride_size = int(config.stride_ratio * self.patch_size)
-        self.num_patches = ((self.image_size - self.patch_size) // self.stride_size) + 1
-        self.projection = nn.Conv1d(self.num_channels, config.hidden_size, kernel_size=self.patch_size, stride=self.stride_size)
-    def forward(self, x):  
-        x = x.reshape(-1, 1, self.image_size) # x size: (batch_size, spectra_length)
-        x = self.projection(x)
-        return x.transpose(1, 2)  # (batch_size, num_patches, hidden_size)
+    def forward(self, pixel_values, labels=None, output_attentions=None, output_hidden_states=None, return_dict=None):
+        return_dict = return_dict or self.config.use_return_dict
+        
+        outputs = self.vit(
+            pixel_values,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        
+        # Use [CLS] token for prediction
+        sequence_output = outputs[0]
+        cls_token = sequence_output[:, 0, :]
+        
+        if self.task_type == 'cls':
+            logits = self.classifier(cls_token)
+        elif self.task_type == 'reg':
+            logits = self.regressor(cls_token)
+        
+        loss = None
+        if labels is not None:
+            if self.task_type == 'cls':
+                loss_fct = nn.CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.config.num_labels), labels.view(-1))
+            elif self.task_type == 'reg':  # regression
+                loss_fct = nn.MSELoss()
+                loss = loss_fct(logits.view(-1), labels.view(-1).float())
+        
+        return SequenceClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
 
 class MyWindowPatchEmbeddings(nn.Module):
     def __init__(self, config):
@@ -67,6 +79,23 @@ class MyWindowPatchEmbeddings(nn.Module):
         x = x.view(batch_size, self.num_patches, self.patch_size)
         x = self.projection(x)
         return x  # (batch_size, num_patches, hidden_size)
+
+
+
+class MyCNN1DPatchEmbeddings(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.image_size = config.image_size # spectra length = 2000
+        self.patch_size = config.patch_size # patch_size = 100
+        self.num_channels = 1
+        self.stride_size = int(config.stride_ratio * self.patch_size)
+        self.num_patches = ((self.image_size - self.patch_size) // self.stride_size) + 1
+        self.projection = nn.Conv1d(self.num_channels, config.hidden_size, kernel_size=self.patch_size, stride=self.stride_size)
+    def forward(self, x):  
+        x = x.reshape(-1, 1, self.image_size) # x size: (batch_size, spectra_length)
+        x = self.projection(x)
+        return x.transpose(1, 2)  # (batch_size, num_patches, hidden_size)
+
 
 class MyEmbeddings(nn.Module):
     """

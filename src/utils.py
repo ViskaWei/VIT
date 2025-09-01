@@ -44,6 +44,15 @@ lick_vac = {'TiO_4': np.array([7645.45, 7719.47, 7529.16, 7579.93, 7737.72, 7784
 #     ew_value = np.trapz(integrand.value, x=feat_wave.value)  # dimensionless × Å
 #     ew_quantity = ew_value * feat_wave.unit
 #     return ew_quantity
+def make_dummy_spectra(n=512, length=4096, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    base = torch.randn(n, length, generator=g) * 0.05
+    centers = [300, 600, 1200, 1600]
+    for c in centers:
+        x = torch.arange(length)
+        line = torch.exp(-0.5*((x-c)/6.0)**2)[None, :]
+        base -= 0.8*line
+    return base
 
 def get_equivalent_width_i(wave, flux, feature_start, feature_end, blue_start, blue_end, red_start, red_end):
      # 1) Select the regions (blue, feature, red) via boolean masks

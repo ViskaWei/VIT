@@ -327,7 +327,11 @@ class BaseLightningModule(L.LightningModule):
         if self.logger and hasattr(self.logger, 'experiment') and hasattr(self.logger.experiment, 'log'):
             self.logger.experiment.log({"lr": lr})
 
-   
+
+
+
+
+
 class BaseTrainer(L.Trainer):
     def __init__(self, config, logger=False, num_gpus=None, sweep=False):
         if sweep:
@@ -339,22 +343,54 @@ class BaseTrainer(L.Trainer):
             enable_checkpointing = True
             enable_progress_bar = True
             enable_model_summary = True
-            num_gpus = num_gpus or config.get('gpus', None) or torch.cuda.device_count()
+        self.acc, self.device0 = self.select_device(num_gpus or config.get('gpus'))
         epoch = config.get('ep', 10)
         super().__init__(
             max_epochs=epoch,
-            devices=num_gpus,
-            accelerator='gpu',
-            strategy='ddp' if num_gpus > 1 else 'auto',
-            logger = logger,
-            precision = '32',
+            devices=self.device0,
+            accelerator=self.acc,
+            strategy='ddp' if self.device0 and self.device0 > 1 else 'auto',
+            logger=logger,
+            precision='32',
             gradient_clip_val=config.get('grad_clip', 0.5),
             # stochastic_weight_avg=True,
             fast_dev_run=config.get('debug', False),
             enable_checkpointing=enable_checkpointing,
             enable_progress_bar=enable_progress_bar,
-            enable_model_summary=enable_model_summary
+            enable_model_summary=enable_model_summary,
         )
+    def select_device(self, num_gpus: Optional[int] = None):
+        """Return accelerator type and device count based on availability."""
+        if num_gpus and num_gpus > 0:
+            if torch.cuda.is_available():
+                return 'gpu', num_gpus
+            if torch.backends.mps.is_available():
+                return 'mps', 1
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            return 'gpu', torch.cuda.device_count()
+        if torch.backends.mps.is_available():
+            return 'mps', 1
+        return 'cpu', 1
+    
+        #     enable_checkpointing = True
+        #     enable_progress_bar = True
+        #     enable_model_summary = True
+        #     num_gpus = num_gpus or config.get('gpus', None) or torch.cuda.device_count()
+        # epoch = config.get('ep', 10)
+        # super().__init__(
+        #     max_epochs=epoch,
+        #     devices=num_gpus,
+        #     accelerator='gpu',
+        #     strategy='ddp' if num_gpus > 1 else 'auto',
+        #     logger = logger,
+        #     precision = '32',
+        #     gradient_clip_val=config.get('grad_clip', 0.5),
+        #     # stochastic_weight_avg=True,
+        #     fast_dev_run=config.get('debug', False),
+        #     enable_checkpointing=enable_checkpointing,
+        #     enable_progress_bar=enable_progress_bar,
+        #     enable_model_summary=enable_model_summary
+        # )
         
         
 class PlotCallback(L.pytorch.callbacks.Callback):
