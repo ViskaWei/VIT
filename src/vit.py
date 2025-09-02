@@ -3,7 +3,7 @@ from torchmetrics import Accuracy, MeanAbsoluteError, R2Score
 import lightning as L
 
 from src.basemodule import BaseLightningModule, BaseTrainer, BaseSpecDataset, BaseDataModule
-from src.callbacks_pca_warm import PCAWarmStartCallback, CKAProbeCallback
+# from src.callbacks_pca_warm import PCAWarmStartCallback, CKAProbeCallback
 
 from src.utils import make_dummy_spectra
 

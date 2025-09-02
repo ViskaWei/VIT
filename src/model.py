@@ -21,8 +21,6 @@ def complete_with_orthogonal(U: torch.Tensor, out_dim: int) -> torch.Tensor:
     Q, _ = torch.linalg.qr(A)  # (in_dim, out_dim)
     return Q[:, :out_dim]
 
-# 在你的 get_vit_model 或主模型构建函数中插入这个层
-PCA_PATH = "evals/pca_U_32.pt"
 def get_model(config):
     """Build ViT or ViT with a PCA-initialized global-attention front-end."""
     warmup_cfg = get_pca_config(config)
@@ -30,8 +28,11 @@ def get_model(config):
     loss_name = config.get('loss', {}).get('name', None)
 
     if warmup_cfg.get('global', False):
-        pca_path = warmup_cfg.get('global_pca_path', PCA_PATH)
-        pca_stats = {"U": torch.load(pca_path, weights_only=True)}  
+        pca_path = warmup_cfg.get('global_pca_path', None)
+        if pca_path is not None:
+            pca_stats = {"U": torch.load(pca_path, weights_only=True)} 
+        else:
+            pca_stats = None 
         return GlobalAttnViT(vit_config, pca_stats=pca_stats, loss_name=loss_name)
 
     return MyViT(vit_config, loss_name=loss_name)
@@ -247,6 +248,13 @@ class GlobalAttentionLayer(nn.Module):
             self.k_proj.weight.data.copy_(U_full.t())
             # You can also initialize V similarly or keep it random
             nn.init.orthogonal_(self.v_proj.weight)
+        else:
+            # Fallback to standard Transformer/ViT-style init
+            # HF ViT uses truncated normal with std=0.02 for Linear weights
+            std = 0.02
+            nn.init.trunc_normal_(self.q_proj.weight, std=std)
+            nn.init.trunc_normal_(self.k_proj.weight, std=std)
+            nn.init.trunc_normal_(self.v_proj.weight, std=std)
         
     def forward(self, x):
         """
