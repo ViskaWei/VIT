@@ -43,7 +43,10 @@ def get_model(config):
             # Optionally freeze Q/K for the first N epochs (train only V + downstream)
         else:
             pca_stats = None
+        # Read freeze setting, but if PCA is not used, force-disable freeze.
         qk_freeze_epochs = int(warmup_cfg.get('freeze_qk_epochs', 0) or 0)
+        if pca_stats is None:
+            qk_freeze_epochs = 0
         
         return GlobalAttnViT(
             vit_config,
