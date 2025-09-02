@@ -1,10 +1,10 @@
 warmup:
-  global: false
-  global_pca_path: evals/pca_U_32.pt
+  global: true
+  global_pca_path: ${PCA_DIR}/pca_4096.pt   # could be a tensor U or dict with {'U', 'S', 'explained_variance_ratio'}
+  r: 32       # PCA rank to use for global attention init
   # enabled: true
   # stats_path: pca_patch.pt, # 预先保存的 PCA 统计
   # attn_path: "model.vit.encoder.layer.0.attention"
-  # r: 32       # PCA component
   # whiten: true
   # robust: false
   # kernel: null       # 或 'rbf'
