@@ -43,16 +43,18 @@ opt:
   patience: 2
 
 data:
-  file_path: '/datascope/subaru/user/swei20/data/bosz50000/z0/train_100k/dataset.h5'
-  val_path: '/datascope/subaru/user/swei20/data/bosz50000/z0/train_1k/dataset.h5'
-  test_path: '/datascope/subaru/user/swei20/data/bosz50000/z0/test_1k/dataset.h5'
-
+  # Define env var DATA_ROOT, e.g.:
+  # export DATA_ROOT=/datascope/subaru/user/swei20/data/bosz50000/z0
+  file_path: "${TRAIN_DIR}/dataset.h5"
+  val_path:  "${VAL_DIR}/dataset.h5"
+  test_path: "${TEST_DIR}/dataset.h5"
   # file_path: '/datascope/subaru/user/swei20/data/bosz50000/test/mag215/train_100k/dataset.h5'
   # val_path: '/datascope/subaru/user/swei20/data/bosz50000/mag215/train_1k/dataset.h5'
   # test_path: '/datascope/subaru/user/swei20/data/bosz50000/mag215/val_1k/dataset.h5'
   num_samples: 100
   num_test_samples: 100
-  param_idx: 1  
+  param: T_eff
+  label_norm: 'minmax' # 'standard', 'minmax', 'zscore', or 'none'
 
 mask:
   mask_ratio: 0.85

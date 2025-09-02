@@ -1,6 +1,6 @@
 import torch
-import torch.nn as nn
 from torchmetrics import Accuracy, MeanAbsoluteError, R2Score
+import lightning as L
 
 from src.basemodule import BaseLightningModule, BaseTrainer, BaseSpecDataset, BaseDataModule
 from src.callbacks_pca_warm import PCAWarmStartCallback, CKAProbeCallback
@@ -22,15 +22,13 @@ def _normalize_task(config):
         return 'cls'
     return 'reg'
 class TestDataset(BaseSpecDataset):
-    def __init__(self, param_idx=1, task='classification', **kwargs):
+    def __init__(self, task='classification', **kwargs):
         super().__init__(**kwargs)
-        self.param_idx = param_idx
         self.task = task
 
     @classmethod
     def from_config(cls, config):
         d = super().from_config(config)
-        d.param_idx = (config.get('data', {}) or {}).get('param_idx', getattr(d, 'param_idx', 1))
         d.task = 'regression' if _normalize_task(config) == 'reg' else 'classification'
         return d
         
@@ -49,14 +47,12 @@ class TestDataset(BaseSpecDataset):
         return self.flux[idx], self.error[idx], self.labels[idx]
     
 class ClassSpecDataset(BaseSpecDataset):
-    def __init__(self, param_idx=1, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.param_idx = param_idx
 
     @classmethod
     def from_config(cls, config):
         d = super().from_config(config)
-        d.param_idx = (config.get('data', {}) or {}).get('param_idx', getattr(d, 'param_idx', 1))
         return d
         
     def load_data(self, stage=None):
@@ -69,34 +65,53 @@ class ClassSpecDataset(BaseSpecDataset):
         return flux, error, self.labels[idx]
 
 class RegSpecDataset(BaseSpecDataset):
-    def __init__(self, param_idx=1, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.param_idx = param_idx
+        # Stats used for label normalization (if enabled)
+        self.label_mean = None
+        self.label_std = None
+        self.label_min = None
+        self.label_max = None
 
     @classmethod
     def from_config(cls, config):
         d = super().from_config(config)
-        d.param_idx = (config.get('data', {}) or {}).get('param_idx', getattr(d, 'param_idx', 1))
         return d
 
     def load_data(self, stage=None):
         super().load_data(stage)
         self.load_params(stage)
-        # Map param_idx to one of the stellar parameters
-        # 0: teff, 1: logg, 2: mh, 3: am, 4: cm
-        mapping = {
-            0: torch.tensor(self.teff),
-            1: torch.tensor(self.logg),
-            2: torch.tensor(self.mh),
-            3: torch.tensor(self.am),
-            4: torch.tensor(self.cm),
-        }
-        key = int(self.param_idx) if int(self.param_idx) in mapping else 1
-        self.labels = mapping[key].float()
+        # Enforce explicit `data.param` for regression targets
+        if not (isinstance(getattr(self, 'param', None), str) and len(self.param) > 0):
+            raise ValueError("Regression requires 'data.param' to be set in the config.")
+        self.labels = torch.tensor(self.param_values).float()
+        # Optional label normalization for regression
+        self._maybe_normalize_labels(stage)
 
     def __getitem__(self, idx):
         flux, error = super().__getitem__(idx)
         return flux, error, self.labels[idx]
+
+    def _maybe_normalize_labels(self, stage=None,  kind=None, eps = 1e-8):
+        kind = getattr(self, 'label_norm', 'none')
+        if kind not in ('standard', 'zscore', 'minmax'):
+            return
+        is_train = stage in (None, 'fit', 'train')
+        if kind in ('standard', 'zscore'):
+            if is_train or (self.label_mean is None or self.label_std is None):
+                self.label_mean = float(self.labels.mean().item())
+                self.label_std = float(self.labels.std(unbiased=False).item())
+            std = self.label_std if self.label_std is not None else 1.0
+            if std < eps: std = 1.0
+            self.labels = (self.labels - self.label_mean) / std
+        elif kind == 'minmax':
+            if is_train or (self.label_min is None or self.label_max is None):
+                self.label_min = float(self.labels.min().item())
+                self.label_max = float(self.labels.max().item())
+            denom = (self.label_max - self.label_min)
+            if abs(denom) < eps: denom = 1.0
+            self.labels = (self.labels - self.label_min) / denom
+        print(f"[{stage or 'all'} data] label normalization '{kind}': mean={self.label_mean}, std={self.label_std}, min={self.label_min}, max={self.label_max}")
     
 #endregion --DATA-----------------------------------------------------------
 #region --DATAMODULE-----------------------------------------------------------
@@ -117,7 +132,13 @@ class ViTDataModule(BaseDataModule):
         return super().from_config(dataset_cls=dataset_cls, config=config)
 
     def setup_test_dataset(self, stage):
-        return self.dataset_cls.from_config(self.config)
+        d = self.dataset_cls.from_config(self.config)
+        # If training dataset computed label normalization stats, propagate them
+        if hasattr(self, 'train') and hasattr(self.train, 'label_norm') and getattr(self.train, 'label_norm', 'none') != 'none':
+            for k in ('label_norm', 'label_mean', 'label_std', 'label_min', 'label_max'):
+                if hasattr(self.train, k):
+                    setattr(d, k, getattr(self.train, k))
+        return d
 #endregion --DATAMODULE-----------------------------------------------------------
 
 #region MODEL-----------------------------------------------------------
@@ -128,7 +149,7 @@ class ViTLModule(BaseLightningModule):
     def __init__(self, model=None, config = {}):
         model = model or self.get_model(config)
         super().__init__(model=model, config=config)
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=['model'])
         self.task_type = _normalize_task(config)
         if self.task_type == 'cls':
             self.accuracy = Accuracy(task='multiclass', num_classes=config['model']['num_labels'])
@@ -171,10 +192,28 @@ class ViTLModule(BaseLightningModule):
         return self._shared_eval_step(batch, 'val')
 
     def test_step(self, batch, batch_idx):
-        return self._shared_eval_step(batch, 'test') 
+        return self._shared_eval_step(batch, 'test')
+    
+    # def test_step(self, batch, batch_idx):
+    #     # Compute metrics as usual
+    #     flux, _, labels = batch
+    #     outputs = self.forward(flux, labels, loss_only=False)
+    #     loss = outputs.loss
+    #     self.log(f'test_{self.loss_name}_loss', loss, on_step=False, on_epoch=True)
+    #     if self.task_type == 'cls':
+    #         acc = self.accuracy(outputs.logits, labels)
+    #         self.log('test_acc', acc, on_step=False, on_epoch=True, prog_bar=True)
+    #         return {"loss": loss}
+    #     elif self.task_type == 'reg':
+    #         preds = outputs.logits.squeeze()
+    #         mae = self.mae(preds, labels)
+    #         r2 = self.r2(preds, labels)
+    #         self.log('test_mae', mae, on_step=False, on_epoch=True)
+    #         self.log('test_r2', r2, on_step=False, on_epoch=True)
+    #         # Return preds and labels for callbacks to post-process/plot
+    #         return {"loss": loss, "preds": preds.detach().cpu(), "labels": labels.detach().cpu()}
+    #     return {"loss": loss}
 #endregion --TRAINER-----------------------------------------------------------
-
-import lightning as L
 
 class SpecTrainer():
     def __init__(self, config, logger, num_gpus=None, sweep=False, monitor_name='acc', monitor_mode='max') -> None:
@@ -187,9 +226,6 @@ class SpecTrainer():
             monitor_name, monitor_mode, filename_suffix = 'mae', 'min', '{mae:.2f}'
 
         self.trainer = BaseTrainer(config=config.get('train', {}), logger=logger, num_gpus=num_gpus, sweep=sweep)
-        # accelerator, devices = self.select_device(num_gpus)
-        
-
         # p = (config.get('pca') or {})
         # if p.get('warm', False):
         #     self.trainer.callbacks.append(PCAWarmStartCallback(
@@ -215,6 +251,9 @@ class SpecTrainer():
             
         earlystopping_callback = L.pytorch.callbacks.EarlyStopping(monitor=f'val_{monitor_name}', patience=patience, mode=monitor_mode, divergence_threshold=1,)
         self.trainer.callbacks.append(earlystopping_callback)
+        # For regression, add original-scale plotting callback at test time
+        # if task_type == 'reg':
+        #     self.trainer.callbacks.append(OrigScalePredPlotCallback(save_dir=SAVE_PATH))
         self.test_trainer = L.Trainer(
             devices=self.trainer.device0,
             accelerator=self.trainer.acc,
@@ -256,11 +295,7 @@ if __name__ == '__main__':
     #     'train': {'ep': 2},
     #     'model': {'input_sigma': True, 'blindspot': True, 'num_layers': 3, 'embed_dim': 3, 'kernel_size': 3}
     # }
-    import yaml
-    def load_config(config_path):
-        with open(config_path, 'r') as file:
-            config = yaml.safe_load(file)
-        return config
+    from src.utils import load_config
 
 # /home/swei20/VIT/configs/vit.yaml
     config  = load_config('./configs/vit.yaml')

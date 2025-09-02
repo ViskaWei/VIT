@@ -31,7 +31,7 @@ def main(args: argparse.Namespace) -> None:
     config = load_config(args.config or 'configs/vit.yaml')
     config['train']['gpus'] = args.gpu
     config['train']['debug'] = args.debug
-    Experiment(config, use_wandb=args.wandb, sweep=False, ckpt_path=args.ckpt, test_data=True).run()
+    Experiment(config, use_wandb=args.wandb, sweep=False, ckpt_path=args.ckpt, test_data=False).run()
 
 if __name__ == "__main__":
     args = parse_args()

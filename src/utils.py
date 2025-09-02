@@ -1,4 +1,5 @@
 import yaml
+import os
 import torch
 import numpy as np
 import pandas as pd
@@ -225,8 +226,24 @@ def masked_var_fraction(noise, mask):
 
 
 def load_config(config_path):
+    """Load YAML and expand env vars/home in all string values.
+
+    Supports values like "$VAR", "${VAR}", and "~".
+    """
     with open(config_path, 'r') as file:
-        return yaml.safe_load(file)
+        data = yaml.safe_load(file)
+
+    def _expand(item):
+        if isinstance(item, str):
+            # Expand env variables and user home
+            return os.path.expanduser(os.path.expandvars(item))
+        if isinstance(item, dict):
+            return {k: _expand(v) for k, v in item.items()}
+        if isinstance(item, list):
+            return [_expand(v) for v in item]
+        return item
+
+    return _expand(data)
 
 
 def save_model(model, filepath):

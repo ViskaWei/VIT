@@ -26,10 +26,10 @@ class Configurable:
         return cls(**params)
 
 class BaseDataset(Configurable, Dataset, ABC):
-    init_params = ['file_path', 'val_path', 'test_path', 'num_samples', 'num_test_samples', 'indices', 'root_dir']
+    init_params = ['file_path', 'val_path', 'test_path', 'num_samples', 'num_test_samples', 'indices', 'root_dir', 'param', 'label_norm']
     config_section = 'data'
 
-    def __init__(self, file_path: str=None, num_samples: Optional[int] = None, test_path=None, num_test_samples: Optional[int] = None, val_path = None, indices: List[int] = None, root_dir: str = './results', **kwargs):
+    def __init__(self, file_path: str=None, num_samples: Optional[int] = None, test_path=None, num_test_samples: Optional[int] = None, val_path = None, indices: List[int] = None, root_dir: str = './results', param: Optional[str] = None, label_norm: Optional[str] = None, **kwargs):
         super().__init__(**kwargs)
         print(file_path, num_samples, test_path, num_test_samples, val_path, indices, root_dir)
         self.file_path = file_path
@@ -39,6 +39,10 @@ class BaseDataset(Configurable, Dataset, ABC):
         self.num_test_samples = num_test_samples if num_test_samples is not None else min(10000, self.num_samples)
         self.indices = indices if indices is not None else [0, 1]
         self.root_dir = root_dir
+        # Optional target parameter to load from HDF; e.g., 'T_eff', 'log_g'
+        self.param = param
+        # Optional label normalization for regression: 'standard'|'zscore'|'minmax'|None
+        self.label_norm = (label_norm or 'none').lower() if isinstance(label_norm, str) else 'none'
         self.test_data_dict = {}
         
     def prepare_data(self):
@@ -181,15 +185,29 @@ class BaseSpecDataset(MaskMixin, NoiseMixin, BaseDataset):
         self.rv = self.z * constants.c / 1000
         
     def load_params(self, stage=None, load_df=False) -> None:
-        load_path, num_samples = self.get_path_and_samples(stage)          
-        df = pd.read_hdf(load_path)[:num_samples]          
-        self.teff = df['T_eff'].values
-        self.mh = df['M_H'].values
-        self.am = df['a_M'].values
-        self.cm = df['C_M'].values
-        self.logg = df['log_g'].values
-        self.logg2 = self.logg < 2.5
-        if load_df: self.df = df
+        """
+        Load stellar parameter(s) from the HDF file.
+        - If self.param is provided (from config `data.param`), only that column is loaded
+          into `self.param_values`.
+        - Otherwise, load the default set of parameters for backward compatibility.
+        """
+        load_path, num_samples = self.get_path_and_samples(stage)
+        df = pd.read_hdf(load_path)[:num_samples]
+
+        if isinstance(self.param, str) and len(self.param) > 0:
+            if self.param not in df.columns:
+                raise KeyError(f"Requested param '{self.param}' not found in HDF columns: {list(df.columns)}")
+            self.param_values = df[self.param].values
+        else:
+            # Backward-compatible behavior: load common parameters
+            self.teff = df['T_eff'].values
+            self.mh = df['M_H'].values
+            self.am = df['a_M'].values
+            self.cm = df['C_M'].values
+            self.logg = df['log_g'].values
+            self.logg2 = self.logg < 2.5
+        if load_df:
+            self.df = df
         # self.gd_labels = self.logg < 2.5
             
     def __getitem__(self, idx: int):
