@@ -193,6 +193,15 @@ class ViTLModule(BaseLightningModule):
 
     def test_step(self, batch, batch_idx):
         return self._shared_eval_step(batch, 'test')
+
+    def on_train_start(self):
+        # Log explained variance (if GlobalAttnViT with PCA stats and r provided)
+        try:
+            attn = getattr(self.model, 'attn', None)
+            if attn is not None and hasattr(attn, 'explained_variance_at_r') and attn.explained_variance_at_r is not None:
+                self.log('pca_explained_variance_at_r', attn.explained_variance_at_r, on_step=False, on_epoch=True, prog_bar=True)
+        except Exception:
+            pass
     
     # def test_step(self, batch, batch_idx):
     #     # Compute metrics as usual

@@ -30,10 +30,17 @@ def get_model(config):
     if warmup_cfg.get('global', False):
         pca_path = warmup_cfg.get('global_pca_path', None)
         if pca_path is not None:
-            pca_stats = {"U": torch.load(pca_path, weights_only=True)} 
+            # Support either a raw tensor (U) or a dict with more stats
+            loaded = torch.load(pca_path, weights_only=True)
+            if isinstance(loaded, dict):
+                pca_stats = loaded
+            else:
+                pca_stats = {"U": loaded}
         else:
             pca_stats = None 
-        return GlobalAttnViT(vit_config, pca_stats=pca_stats, loss_name=loss_name)
+        # Pass optional rank r from config for PCA init
+        r = warmup_cfg.get('r', None)
+        return GlobalAttnViT(vit_config, pca_stats=pca_stats, loss_name=loss_name, r=r)
 
     return MyViT(vit_config, loss_name=loss_name)
 
@@ -218,9 +225,10 @@ class MyEmbeddings(nn.Module):
         return x
 
 class GlobalAttentionLayer(nn.Module):
-    def __init__(self, input_dim, pca_stats):
+    def __init__(self, input_dim, pca_stats, r: int | None = None):
         super(GlobalAttentionLayer, self).__init__()
         self.input_dim = input_dim  # e.g., 4000
+        self.r = int(r) if (r is not None) else None
         self.q_proj = nn.Linear(input_dim, input_dim, bias=False)
         self.k_proj = nn.Linear(input_dim, input_dim, bias=False)
         self.v_proj = nn.Linear(input_dim, input_dim, bias=False)
@@ -234,13 +242,19 @@ class GlobalAttentionLayer(nn.Module):
             if U.size(0) == self.input_dim and U.size(1) <= self.input_dim:
                 # Already (input_dim, r)
                 U_mat = U
-                r = U.size(1)
+                inferred_r = U.size(1)
             elif U.size(1) == self.input_dim and U.size(0) <= self.input_dim:
                 # Provided as (r, input_dim) -> transpose to (input_dim, r)
                 U_mat = U.t()
-                r = U.size(0)
+                inferred_r = U.size(0)
             else:
                 raise ValueError(f"Unexpected PCA U shape {tuple(U.shape)} for input_dim={self.input_dim}")
+
+            # If r is provided, select the first r components (or all available if smaller)
+            if self.r is not None:
+                keep_r = min(self.r, inferred_r)
+                U_mat = U_mat[:, :keep_r]
+            # else keep U_mat as-is
 
             # Complete U to a full orthogonal basis and copy to weights
             U_full = complete_with_orthogonal(U_mat, self.q_proj.weight.shape[0])  # (in_dim, out_dim)
@@ -248,6 +262,24 @@ class GlobalAttentionLayer(nn.Module):
             self.k_proj.weight.data.copy_(U_full.t())
             # You can also initialize V similarly or keep it random
             nn.init.orthogonal_(self.v_proj.weight)
+
+            # Try to compute and store explained variance up to r (if available)
+            self.explained_variance_at_r = None
+            try:
+                if self.r is not None:
+                    if isinstance(pca_stats, dict) and ("explained_variance_ratio" in pca_stats):
+                        evr = pca_stats["explained_variance_ratio"]
+                        keep_r = min(int(self.r), int(evr.shape[0]))
+                        self.explained_variance_at_r = float(evr[:keep_r].sum().item())
+                    elif isinstance(pca_stats, dict) and ("S" in pca_stats):
+                        S = pca_stats["S"]
+                        total_var = float((S ** 2).sum().item())
+                        keep_r = min(int(self.r), int(S.shape[0]))
+                        num = float((S[:keep_r] ** 2).sum().item())
+                        self.explained_variance_at_r = num / total_var if total_var > 0 else None
+            except Exception:
+                # Best-effort; don't fail init if stats aren't compatible
+                self.explained_variance_at_r = None
         else:
             # Fallback to standard Transformer/ViT-style init
             # HF ViT uses truncated normal with std=0.02 for Linear weights
@@ -287,10 +319,10 @@ class GlobalAttnViT(MyViT):
     delegating to the parent `MyViT` forward.
     """
 
-    def __init__(self, config, pca_stats=None, loss_name=None, model_name="GAtt_ViT"):
+    def __init__(self, config, pca_stats=None, loss_name=None, model_name="GAtt_ViT", r: int | None = None):
         model_name = f"Gpca_{model_name}" if pca_stats is not None else f"Grd_{model_name}"
         super().__init__(config, loss_name=loss_name, model_name=model_name)
-        self.attn = GlobalAttentionLayer(input_dim=config.image_size, pca_stats=pca_stats)
+        self.attn = GlobalAttentionLayer(input_dim=config.image_size, pca_stats=pca_stats, r=r)
 
     def forward(self,
                 pixel_values,
