@@ -30,10 +30,8 @@ def get_model(config):
     loss_name = config.get('loss', {}).get('name', None)
 
     if warmup_cfg.get('global', False):
-        # Load PCA U from config or default path
         pca_path = warmup_cfg.get('global_pca_path', PCA_PATH)
-        pca_stats = {"U": torch.load(pca_path)}  # 包含U矩阵等
-        # Build model that prepends a global attention layer before ViT
+        pca_stats = {"U": torch.load(pca_path, weights_only=True)}  
         return GlobalAttnViT(vit_config, pca_stats=pca_stats, loss_name=loss_name)
 
     return MyViT(vit_config, loss_name=loss_name)
