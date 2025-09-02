@@ -6,6 +6,10 @@ from src.vit import Experiment
 
 os.environ['WANDB_ENTITY'] = 'viskawei-johns-hopkins-university'
 os.environ['VIT_PROJECT'] = 'vit-test'
+# Reduce CPU thread oversubscription when running many agents
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+os.environ.setdefault('MKL_NUM_THREADS', '1')
+os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
 
 def train_fn(args=None):
     # Load base config (prefer wandb.config override, fallback to env)
@@ -30,6 +34,13 @@ def train_fn(args=None):
 
     # Keep dataloader workers modest under multi-agent sweeps
     train = config.setdefault('train', {})
+    # Allow override via env for quick experiments
+    env_nw = os.environ.get('NUM_WORKERS')
+    if env_nw is not None:
+        try:
+            train['num_workers'] = int(env_nw)
+        except ValueError:
+            pass
     if 'num_workers' not in train:
         # Map legacy key 'workers' if present; otherwise default low for stability
         train['num_workers'] = int(train.get('workers', 2))

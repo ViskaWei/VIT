@@ -264,11 +264,15 @@ class GlobalAttentionLayer(nn.Module):
                 U_mat = U_mat[:, :keep_r]
             # else keep U_mat as-is
 
-            # Complete U to a full orthogonal basis and copy to weights
-            U_full = complete_with_orthogonal(U_mat, self.q_proj.weight.shape[0])  # (in_dim, out_dim)
-            self.q_proj.weight.data.copy_(U_full.t())
-            self.k_proj.weight.data.copy_(U_full.t())
-            # You can also initialize V similarly or keep it random
+            # Lightweight init: avoid expensive full QR on (D x D).
+            # Initialize weights orthogonally, then place PCA directions in the
+            # top rows so they act as the first projections.
+            nn.init.orthogonal_(self.q_proj.weight)
+            nn.init.orthogonal_(self.k_proj.weight)
+            keep_r = U_mat.shape[1]
+            self.q_proj.weight.data[:keep_r, :].copy_(U_mat.t())
+            self.k_proj.weight.data[:keep_r, :].copy_(U_mat.t())
+            # Initialize V independently
             nn.init.orthogonal_(self.v_proj.weight)
 
             # Try to compute and store explained variance up to r (if available)
