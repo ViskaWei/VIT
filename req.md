@@ -1,1 +1,1 @@
-torch numpy h5py lightning transformers matplotlib wandb scipy pandas
+torch numpy h5py lightning transformers matplotlib wandb scipy pandas tables litmodels

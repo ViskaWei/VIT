@@ -177,4 +177,6 @@ else/
 *.npz
 *.h5
 
-pca_data
+data
+*.env
+*.vscode

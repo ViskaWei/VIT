@@ -1,11 +1,41 @@
-source /srv/local/tmp/swei20/miniconda3/bin/activate viska-torch-3
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
-export CUDA_VISIBLE_DEVICES='0'
-export PYTHONPATH=$PWD:$PYTHONPATH
+# Load project environment variables if present
+if [ -f ./.env ]; then
+  # Export variables defined in .env automatically
+  set -a
+  . ./.env
+  set +a
+fi
+
+# Determine virtualenv activate script
+if [ -z "${VENV_PATH:-}" ]; then
+  if [ -f ".venv/bin/activate" ]; then
+    VENV_PATH=".venv/bin/activate"
+  elif [ -f "venv/bin/activate" ]; then
+    VENV_PATH="venv/bin/activate"
+  else
+    echo "No virtualenv found. Create one with: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt" >&2
+    exit 1
+  fi
+fi
+
+# Activate virtual environment
+# shellcheck disable=SC1090
+source "$VENV_PATH"
+
+# Ensure PYTHONPATH includes this repo root
+export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+
+# Ensure required data root is set
+if [ -z "${DATA_ROOT:-}" ]; then
+  echo "DATA_ROOT is not set. Define it in .env or your shell profile." >&2
+  exit 1
+fi
 
 start_time=$(date +%s)
-python ./scripts/run.py -f  ./configs/vit.yaml -w 1 
-
+python ./scripts/test.py -f ./configs/vit.yaml -w 0 --debug 1
 
 end_time=$(date +%s)
 elapsed_time_1=$((end_time - start_time))
