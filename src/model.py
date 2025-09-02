@@ -288,6 +288,7 @@ class GlobalAttnViT(MyViT):
     """
 
     def __init__(self, config, pca_stats=None, loss_name=None, model_name="GAtt_ViT"):
+        model_name = f"Gpca_{model_name}" if pca_stats is not None else f"Grd_{model_name}"
         super().__init__(config, loss_name=loss_name, model_name=model_name)
         self.attn = GlobalAttentionLayer(input_dim=config.image_size, pca_stats=pca_stats)
 
