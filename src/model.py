@@ -28,20 +28,23 @@ def get_model(config):
     loss_name = config.get('loss', {}).get('name', None)
 
     if warmup_cfg.get('global', False):
+        r = warmup_cfg.get('r', None)   # Pass optional rank r from config for PCA init
         pca_path = warmup_cfg.get('global_pca_path', None)
-        if pca_path is not None:
+        # If r == 0, explicitly skip any PCA warm logic and do not load.
+        if (r is not None) and int(r) == 0:
+            pca_stats = None
+        elif pca_path is not None and (r is None or int(r) > 0):
             # Support either a raw tensor (U) or a dict with more stats
             loaded = torch.load(pca_path, weights_only=True)
             if isinstance(loaded, dict):
                 pca_stats = loaded
             else:
                 pca_stats = {"U": loaded}
+            # Optionally freeze Q/K for the first N epochs (train only V + downstream)
         else:
-            pca_stats = None 
-        # Pass optional rank r from config for PCA init
-        r = warmup_cfg.get('r', None)
-        # Optionally freeze Q/K for the first N epochs (train only V + downstream)
+            pca_stats = None
         qk_freeze_epochs = int(warmup_cfg.get('freeze_qk_epochs', 0) or 0)
+        
         return GlobalAttnViT(
             vit_config,
             pca_stats=pca_stats,
@@ -349,6 +352,9 @@ class GlobalAttnViT(MyViT):
         """Freeze Q/K for the first `qk_freeze_epochs` epochs.
         Returns True if Q/K are frozen for this epoch, else False.
         """
+        # If no freeze is requested, avoid touching any state.
+        if self.qk_freeze_epochs <= 0:
+            return False
         should_freeze = (current_epoch < self.qk_freeze_epochs)
         if should_freeze != self._qk_frozen_state:
             # Transition state only when it changes
