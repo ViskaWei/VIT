@@ -240,9 +240,11 @@ class BaseDataModule(L.LightningDataModule):
     @classmethod
     def from_config(cls, dataset_cls=BaseDataset, config: Dict[str, Any]={}):
         train_config = config.get('train', {})
+        # Accept both 'num_workers' and legacy 'workers'
+        num_workers = train_config.get('num_workers', train_config.get('workers', 24))
         return cls(
             batch_size=train_config.get('batch_size', 256),
-            num_workers=train_config.get('num_workers', 24),
+            num_workers=num_workers,
             debug=train_config.get('debug', False),
             dataset_cls=dataset_cls,
             config=config,

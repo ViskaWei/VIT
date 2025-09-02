@@ -28,8 +28,38 @@ def train_fn(args=None):
         r_cfg = r_arg if r_arg is not None else config.get('warmup', {}).get('r', 32)
     config['warmup']['r'] = int(r_cfg)
 
+    # Keep dataloader workers modest under multi-agent sweeps
+    train = config.setdefault('train', {})
+    if 'num_workers' not in train:
+        # Map legacy key 'workers' if present; otherwise default low for stability
+        train['num_workers'] = int(train.get('workers', 2))
+    # Cap workers to avoid oversubscription when many agents run in parallel
+    try:
+        cpu_cnt = os.cpu_count() or 8
+        # Reserve CPUs roughly evenly if multiple GPUs/agents; conservative cap
+        train['num_workers'] = max(0, min(int(train['num_workers']), max(1, cpu_cnt // 8)))
+    except Exception:
+        pass
+
     # Run one training with W&B logging in sweep mode
     exp = Experiment(config, use_wandb=True, sweep=True, num_gpus=1, test_data=False)
+    # Ensure the W&B run has a readable, deterministic name
+    try:
+        run = wandb.run
+        if run is None:
+            # Fallback: try Lightning's WandbLogger experiment handle
+            trainer = getattr(getattr(exp, 't', None), 'trainer', None)
+            if trainer and getattr(trainer, 'logger', None) and hasattr(trainer.logger, 'experiment'):
+                run = trainer.logger.experiment
+        if run is not None and hasattr(exp, 'lightning_module') and hasattr(exp.lightning_module, 'model'):
+            run.name = exp.lightning_module.model.name
+            # Persist the change to the UI immediately
+            try:
+                run.save()
+            except Exception:
+                pass
+    except Exception:
+        pass
     exp.run()
 
 
