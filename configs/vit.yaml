@@ -2,6 +2,7 @@ warmup:
   global: true
   global_pca_path: ${PCA_DIR}/pca_4096.pt   # could be a tensor U or dict with {'U', 'S', 'explained_variance_ratio'}
   r: 32       # PCA rank to use for global attention init
+  freeze_qk_epochs: 5
   # enabled: true
   # stats_path: pca_patch.pt, # 预先保存的 PCA 统计
   # attn_path: "model.vit.encoder.layer.0.attention"
@@ -28,7 +29,7 @@ model:
 
 train:
   batch_size: 50
-  ep: 1
+  ep: 10
   debug: 0
   workers: 10
 

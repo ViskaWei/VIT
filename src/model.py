@@ -334,7 +334,7 @@ class GlobalAttnViT(MyViT):
     """
 
     def __init__(self, config, pca_stats=None, loss_name=None, model_name="GAtt_ViT", r: int | None = None, qk_freeze_epochs: int = 0):
-        model_name = f"Gpca{r}_{model_name}" if pca_stats is not None else f"Grd_{model_name}"
+        model_name = f"Gpca{r}_fz{qk_freeze_epochs}_{model_name}" if pca_stats is not None else f"Grd_{model_name}"
         super().__init__(config, loss_name=loss_name, model_name=model_name)
         self.attn = GlobalAttentionLayer(input_dim=config.image_size, pca_stats=pca_stats, r=r)
         # Freeze Q/K for the first N epochs if requested
