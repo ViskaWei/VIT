@@ -202,6 +202,26 @@ class ViTLModule(BaseLightningModule):
                 self.log('pca_explained_variance_at_r', attn.explained_variance_at_r, on_step=False, on_epoch=True, prog_bar=True)
         except Exception:
             pass
+
+        # Apply initial Q/K freeze state at epoch 0 if configured
+        try:
+            if hasattr(self.model, 'apply_qk_freeze'):
+                frozen = bool(self.model.apply_qk_freeze(current_epoch=0))
+                self.log('qk_frozen', int(frozen), on_step=False, on_epoch=True)
+        except Exception:
+            pass
+
+    def on_train_epoch_start(self):
+        # Keep BaseLightningModule behavior (LR logging)
+        super().on_train_epoch_start()
+        # Enforce Q/K freeze schedule if available on the model
+        try:
+            if hasattr(self.model, 'apply_qk_freeze'):
+                frozen = bool(self.model.apply_qk_freeze(current_epoch=self.current_epoch))
+                # Log an indicator for monitoring
+                self.log('qk_frozen', int(frozen), on_step=False, on_epoch=True, prog_bar=False)
+        except Exception:
+            pass
     
     # def test_step(self, batch, batch_idx):
     #     # Compute metrics as usual

@@ -40,7 +40,15 @@ def get_model(config):
             pca_stats = None 
         # Pass optional rank r from config for PCA init
         r = warmup_cfg.get('r', None)
-        return GlobalAttnViT(vit_config, pca_stats=pca_stats, loss_name=loss_name, r=r)
+        # Optionally freeze Q/K for the first N epochs (train only V + downstream)
+        qk_freeze_epochs = int(warmup_cfg.get('freeze_qk_epochs', 0) or 0)
+        return GlobalAttnViT(
+            vit_config,
+            pca_stats=pca_stats,
+            loss_name=loss_name,
+            r=r,
+            qk_freeze_epochs=qk_freeze_epochs,
+        )
 
     return MyViT(vit_config, loss_name=loss_name)
 
@@ -310,6 +318,12 @@ class GlobalAttentionLayer(nn.Module):
 
         return attn_output
 
+    # --- Utilities for freezing/unfreezing Q/K during training ---
+    def set_qk_trainable(self, trainable: bool = True):
+        self.q_proj.weight.requires_grad = trainable
+        self.k_proj.weight.requires_grad = trainable
+        # v_proj remains trainable regardless to allow learning values
+
 
 class GlobalAttnViT(MyViT):
     """MyViT with a global PCA-initialized attention preconditioning layer.
@@ -319,10 +333,24 @@ class GlobalAttnViT(MyViT):
     delegating to the parent `MyViT` forward.
     """
 
-    def __init__(self, config, pca_stats=None, loss_name=None, model_name="GAtt_ViT", r: int | None = None):
-        model_name = f"Gpca_{model_name}" if pca_stats is not None else f"Grd_{model_name}"
+    def __init__(self, config, pca_stats=None, loss_name=None, model_name="GAtt_ViT", r: int | None = None, qk_freeze_epochs: int = 0):
+        model_name = f"Gpca{r}_{model_name}" if pca_stats is not None else f"Grd_{model_name}"
         super().__init__(config, loss_name=loss_name, model_name=model_name)
         self.attn = GlobalAttentionLayer(input_dim=config.image_size, pca_stats=pca_stats, r=r)
+        # Freeze Q/K for the first N epochs if requested
+        self.qk_freeze_epochs = int(qk_freeze_epochs or 0)
+        self._qk_frozen_state = None  # track last applied state
+
+    def apply_qk_freeze(self, current_epoch: int) -> bool:
+        """Freeze Q/K for the first `qk_freeze_epochs` epochs.
+        Returns True if Q/K are frozen for this epoch, else False.
+        """
+        should_freeze = (current_epoch < self.qk_freeze_epochs)
+        if should_freeze != self._qk_frozen_state:
+            # Transition state only when it changes
+            self.attn.set_qk_trainable(not should_freeze)
+            self._qk_frozen_state = should_freeze
+        return should_freeze
 
     def forward(self,
                 pixel_values,
