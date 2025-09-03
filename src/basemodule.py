@@ -154,9 +154,10 @@ class BaseSpecDataset(MaskMixin, NoiseMixin, BaseDataset):
         load_path, num_samples = self.get_path_and_samples(stage)  
         print('loading data from', load_path, num_samples)          
         with h5py.File(load_path, 'r') as f:
-            self.wave = torch.Tensor(f['spectrumdataset/wave'][()])
-            self.flux = torch.Tensor(f['dataset/arrays/flux/value'][:num_samples])
-            self.error = torch.Tensor(f['dataset/arrays/error/value'][:num_samples])
+            # Force float32 to avoid inadvertent float64 tensors (which double memory)
+            self.wave = torch.tensor(f['spectrumdataset/wave'][()], dtype=torch.float32)
+            self.flux = torch.tensor(f['dataset/arrays/flux/value'][:num_samples], dtype=torch.float32)
+            self.error = torch.tensor(f['dataset/arrays/error/value'][:num_samples], dtype=torch.float32)
 
         self.flux = self.flux.clip(min=0.0)
         # self.error = self.error0.clip(min=1e-6, max=1.0)
@@ -365,13 +366,15 @@ class BaseTrainer(L.Trainer):
             enable_model_summary = True
         self.acc, self.device0 = self.select_device(num_gpus or config.get('gpus'))
         epoch = config.get('ep', 10)
+        # Allow precision override via config.train.precision, default FP32
+        precision = str(config.get('precision', '32'))
         super().__init__(
             max_epochs=epoch,
             devices=self.device0,
             accelerator=self.acc,
             strategy='ddp' if self.device0 and self.device0 > 1 else 'auto',
             logger=logger,
-            precision='32',
+            precision=precision,
             gradient_clip_val=config.get('grad_clip', 0.5),
             # stochastic_weight_avg=True,
             fast_dev_run=config.get('debug', False),

@@ -1,8 +1,9 @@
 warmup:
   global: true
   global_pca_path: ${PCA_DIR}/pca_4096.pt   # could be a tensor U or dict with {'U', 'S', 'explained_variance_ratio'}
-  r: 32       # PCA rank to use for global attention init
+  r: 128      # Low-rank dimension for Q/K/V (try 128 or 64)
   freeze_qk_epochs: 5
+  lora: false  # if true, use low-rank (D->r->D) projections for Q/K/V
   # enabled: true
   # stats_path: pca_patch.pt, # 预先保存的 PCA 统计
   # attn_path: "model.vit.encoder.layer.0.attention"
@@ -32,6 +33,7 @@ train:
   ep: 10
   debug: 0
   workers: 10
+  # precision: '16-mixed'   # uncomment to reduce memory further
 
 loss: 
   name: 'l1'

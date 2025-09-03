@@ -30,6 +30,7 @@ def get_model(config):
     if warmup_cfg.get('global', False):
         r = warmup_cfg.get('r', None)   # Pass optional rank r from config for PCA init
         pca_path = warmup_cfg.get('global_pca_path', None)
+        use_lora = bool(warmup_cfg.get('lora', False))
         # If r == 0, explicitly skip any PCA warm logic and do not load.
         if (r is not None) and int(r) == 0:
             pca_stats = None
@@ -53,6 +54,7 @@ def get_model(config):
             pca_stats=pca_stats,
             loss_name=loss_name,
             r=r,
+            use_lora=use_lora,
             qk_freeze_epochs=qk_freeze_epochs,
         )
 
@@ -239,81 +241,124 @@ class MyEmbeddings(nn.Module):
         return x
 
 class GlobalAttentionLayer(nn.Module):
-    def __init__(self, input_dim, pca_stats, r: int | None = None):
+    def __init__(self, input_dim, pca_stats, r: int | None = None, use_lora: bool = False):
         super(GlobalAttentionLayer, self).__init__()
-        self.input_dim = input_dim  # e.g., 4000
+        self.input_dim = input_dim  # e.g., 4096
+        self.use_lora = bool(use_lora)
         self.r = int(r) if (r is not None) else None
-        self.q_proj = nn.Linear(input_dim, input_dim, bias=False)
-        self.k_proj = nn.Linear(input_dim, input_dim, bias=False)
-        self.v_proj = nn.Linear(input_dim, input_dim, bias=False)
+        if self.use_lora:
+            if self.r is None or self.r <= 0:
+                self.r = min(64, self.input_dim)
+            rank = min(self.r, self.input_dim)
+            self.rank = rank
+            # Low-rank factorization: D->r->D
+            self.q_down = nn.Linear(input_dim, rank, bias=False)
+            self.q_up = nn.Linear(rank, input_dim, bias=False)
+            self.k_down = nn.Linear(input_dim, rank, bias=False)
+            self.k_up = nn.Linear(rank, input_dim, bias=False)
+            self.v_down = nn.Linear(input_dim, rank, bias=False)
+            self.v_up = nn.Linear(rank, input_dim, bias=False)
+        else:
+            # Full D->D projections like the original
+            self.q_lin = nn.Linear(input_dim, input_dim, bias=False)
+            self.k_lin = nn.Linear(input_dim, input_dim, bias=False)
+            self.v_lin = nn.Linear(input_dim, input_dim, bias=False)
         self.softmax = nn.Softmax(dim=-1)
-        
-        # Use PCA to initialize Q, K
-        if pca_stats is not None:
-            U = pca_stats["U"]  # U may be (r, input_dim) or (input_dim, r)
 
-            # Normalize orientation so we always have U_mat with shape (input_dim, r)
+        # PCA initialization for Q/K
+        if pca_stats is not None and ("U" in pca_stats):
+            U = pca_stats["U"]  # U may be (r, D) or (D, r)
+            if U.dim() != 2:
+                raise ValueError("PCA U must be a 2D tensor")
             if U.size(0) == self.input_dim and U.size(1) <= self.input_dim:
-                # Already (input_dim, r)
-                U_mat = U
+                U_mat = U  # (D, r_like)
                 inferred_r = U.size(1)
             elif U.size(1) == self.input_dim and U.size(0) <= self.input_dim:
-                # Provided as (r, input_dim) -> transpose to (input_dim, r)
-                U_mat = U.t()
+                U_mat = U.t()  # transpose to (D, r_like)
                 inferred_r = U.size(0)
             else:
                 raise ValueError(f"Unexpected PCA U shape {tuple(U.shape)} for input_dim={self.input_dim}")
 
-            # If r is provided, select the first r components (or all available if smaller)
-            if self.r is not None:
-                keep_r = min(self.r, inferred_r)
-                U_mat = U_mat[:, :keep_r]
-            # else keep U_mat as-is
+            if self.use_lora:
+                use_r = min(self.rank, inferred_r)
+                U_mat = U_mat[:, :use_r]  # (D, use_r)
+                # Set down = U^T, up = U so that W ≈ U @ U^T (orthogonal projector)
+                self.q_down.weight.data.zero_()
+                self.q_up.weight.data.zero_()
+                self.k_down.weight.data.zero_()
+                self.k_up.weight.data.zero_()
+                self.q_down.weight.data[:use_r, :].copy_(U_mat.t())
+                self.q_up.weight.data[:, :use_r].copy_(U_mat)
+                self.k_down.weight.data[:use_r, :].copy_(U_mat.t())
+                self.k_up.weight.data[:, :use_r].copy_(U_mat)
+                # Initialize V low-rank orthogonally
+                nn.init.orthogonal_(self.v_down.weight)
+                nn.init.orthogonal_(self.v_up.weight)
+            else:
+                # Full matrix: place PCA vectors in top rows of Q/K
+                nn.init.orthogonal_(self.q_lin.weight)
+                nn.init.orthogonal_(self.k_lin.weight)
+                keep_r = min(inferred_r, self.r or inferred_r)
+                self.q_lin.weight.data[:keep_r, :].copy_(U_mat.t()[:keep_r, :])
+                self.k_lin.weight.data[:keep_r, :].copy_(U_mat.t()[:keep_r, :])
+                nn.init.orthogonal_(self.v_lin.weight)
 
-            # Lightweight init: avoid expensive full QR on (D x D).
-            # Initialize weights orthogonally, then place PCA directions in the
-            # top rows so they act as the first projections.
-            nn.init.orthogonal_(self.q_proj.weight)
-            nn.init.orthogonal_(self.k_proj.weight)
-            keep_r = U_mat.shape[1]
-            self.q_proj.weight.data[:keep_r, :].copy_(U_mat.t())
-            self.k_proj.weight.data[:keep_r, :].copy_(U_mat.t())
-            # Initialize V independently
-            nn.init.orthogonal_(self.v_proj.weight)
-
-            # Try to compute and store explained variance up to r (if available)
+            # Store explained variance up to r if available
             self.explained_variance_at_r = None
             try:
-                if self.r is not None:
-                    if isinstance(pca_stats, dict) and ("explained_variance_ratio" in pca_stats):
-                        evr = pca_stats["explained_variance_ratio"]
-                        keep_r = min(int(self.r), int(evr.shape[0]))
-                        self.explained_variance_at_r = float(evr[:keep_r].sum().item())
-                    elif isinstance(pca_stats, dict) and ("S" in pca_stats):
-                        S = pca_stats["S"]
-                        total_var = float((S ** 2).sum().item())
-                        keep_r = min(int(self.r), int(S.shape[0]))
-                        num = float((S[:keep_r] ** 2).sum().item())
-                        self.explained_variance_at_r = num / total_var if total_var > 0 else None
+                if isinstance(pca_stats, dict) and ("explained_variance_ratio" in pca_stats):
+                    evr = pca_stats["explained_variance_ratio"]
+                    use_val = (self.rank if self.use_lora else (self.r or evr.shape[0]))
+                    keep_r = min(int(use_val), int(evr.shape[0]))
+                    self.explained_variance_at_r = float(evr[:keep_r].sum().item())
+                elif isinstance(pca_stats, dict) and ("S" in pca_stats):
+                    S = pca_stats["S"]
+                    total_var = float((S ** 2).sum().item())
+                    use_val = (self.rank if self.use_lora else (self.r or S.shape[0]))
+                    keep_r = min(int(use_val), int(S.shape[0]))
+                    num = float((S[:keep_r] ** 2).sum().item())
+                    self.explained_variance_at_r = num / total_var if total_var > 0 else None
             except Exception:
-                # Best-effort; don't fail init if stats aren't compatible
                 self.explained_variance_at_r = None
         else:
-            # Fallback to standard Transformer/ViT-style init
-            # HF ViT uses truncated normal with std=0.02 for Linear weights
-            std = 0.02
-            nn.init.trunc_normal_(self.q_proj.weight, std=std)
-            nn.init.trunc_normal_(self.k_proj.weight, std=std)
-            nn.init.trunc_normal_(self.v_proj.weight, std=std)
-        
+            # Random init depending on mode
+            if self.use_lora:
+                nn.init.orthogonal_(self.q_down.weight)
+                nn.init.orthogonal_(self.q_up.weight)
+                nn.init.orthogonal_(self.k_down.weight)
+                nn.init.orthogonal_(self.k_up.weight)
+                nn.init.orthogonal_(self.v_down.weight)
+                nn.init.orthogonal_(self.v_up.weight)
+            else:
+                std = 0.02
+                nn.init.trunc_normal_(self.q_lin.weight, std=std)
+                nn.init.trunc_normal_(self.k_lin.weight, std=std)
+                nn.init.trunc_normal_(self.v_lin.weight, std=std)
+            self.explained_variance_at_r = None
+
+    def q_proj(self, x):
+        if self.use_lora:
+            return self.q_up(self.q_down(x))
+        return self.q_lin(x)
+
+    def k_proj(self, x):
+        if self.use_lora:
+            return self.k_up(self.k_down(x))
+        return self.k_lin(x)
+
+    def v_proj(self, x):
+        if self.use_lora:
+            return self.v_up(self.v_down(x))
+        return self.v_lin(x)
+
     def forward(self, x):
         """
         Supports:
-        - 2D input `(B, D)`: apply linear projection only (preconditioning)
+        - 2D input `(B, D)`: apply low-rank preconditioning via Q only
         - 3D input `(B, L, D)`: apply simple global attention over `L`
         """
         if x.dim() == 2:
-            # (B, D) -> (B, D), pre-project with PCA-initialized q_proj
+            # (B, D) -> (B, D), pre-project with low-rank Q mapping
             return self.q_proj(x)
 
         # Expect (B, L, D) for attention
@@ -321,18 +366,20 @@ class GlobalAttentionLayer(nn.Module):
         k = self.k_proj(x)
         v = self.v_proj(x)
 
-        # Compute attention scores over sequence dimension L
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (self.input_dim ** 0.5)
         attn_probs = self.softmax(attn_scores)
         attn_output = torch.matmul(attn_probs, v)
-
         return attn_output
 
     # --- Utilities for freezing/unfreezing Q/K during training ---
     def set_qk_trainable(self, trainable: bool = True):
-        self.q_proj.weight.requires_grad = trainable
-        self.k_proj.weight.requires_grad = trainable
-        # v_proj remains trainable regardless to allow learning values
+        if self.use_lora:
+            modules = (self.q_down, self.q_up, self.k_down, self.k_up)
+        else:
+            modules = (self.q_lin, self.k_lin)
+        for m in modules:
+            for p in m.parameters():
+                p.requires_grad = trainable
 
 
 class GlobalAttnViT(MyViT):
@@ -343,10 +390,11 @@ class GlobalAttnViT(MyViT):
     delegating to the parent `MyViT` forward.
     """
 
-    def __init__(self, config, pca_stats=None, loss_name=None, model_name="GAtt_ViT", r: int | None = None, qk_freeze_epochs: int = 0):
-        model_name = f"Gpca{r}_fz{qk_freeze_epochs}_{model_name}" if pca_stats is not None else f"Grd_{model_name}"
+    def __init__(self, config, pca_stats=None, loss_name=None, model_name="GAtt_ViT", r: int | None = None, use_lora: bool = False, qk_freeze_epochs: int = 0):
+        tag = (f"Lo{r}" if use_lora else f"Fc{r}") if pca_stats is not None else ("LoRD" if use_lora else "FcRD")
+        model_name = f"Gpca{tag}_fz{qk_freeze_epochs}_{model_name}"
         super().__init__(config, loss_name=loss_name, model_name=model_name)
-        self.attn = GlobalAttentionLayer(input_dim=config.image_size, pca_stats=pca_stats, r=r)
+        self.attn = GlobalAttentionLayer(input_dim=config.image_size, pca_stats=pca_stats, r=r, use_lora=use_lora)
         # Freeze Q/K for the first N epochs if requested
         self.qk_freeze_epochs = int(qk_freeze_epochs or 0)
         self._qk_frozen_state = None  # track last applied state
