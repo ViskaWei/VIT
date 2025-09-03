@@ -32,9 +32,9 @@ def main(args: argparse.Namespace) -> None:
     config = load_config(args.config or 'configs/vit.yaml')
     config['train']['gpus'] = args.gpu
     config['train']['debug'] = args.debug
+    use_wandb = bool(args.wandb)
     # Only save when --save is provided
     config['train']['save'] = bool(args.save)
-    use_wandb = 1 if args.save else 0
     Experiment(config, use_wandb=use_wandb, sweep=False, ckpt_path=args.ckpt, test_data=True).run()
 
 if __name__ == "__main__":

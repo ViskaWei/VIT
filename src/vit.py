@@ -303,11 +303,12 @@ class Experiment:
         self.data_module = ViTDataModule.from_config(config, test_data=test_data)
 
         self.lightning_module.sweep = sweep
-        if use_wandb and (config.get('train', {}).get('save', False)):
+        if use_wandb:
+            log_model =  config.get('train', {}).get('save', False) 
             if sweep:
                 logger = L.pytorch.loggers.WandbLogger(config=config, name=self.lightning_module.model.name, log_model=False, save_dir=SAVE_DIR) 
             else:
-                logger = L.pytorch.loggers.WandbLogger(project = config['project'], config=config, name=self.lightning_module.model.name, log_model=False, save_dir=SAVE_DIR)
+                logger = L.pytorch.loggers.WandbLogger(project = config['project'], config=config, name=self.lightning_module.model.name, log_model=log_model, save_dir=SAVE_DIR)
         else:
             logger = None
         # Choose monitor based on task
