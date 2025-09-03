@@ -1,0 +1,67 @@
+warmup:
+  global: true
+  global_pca_path: ${PCA_DIR}/pca_4096.pt
+  r: 4096
+  freeze_qk_epochs: 50
+  # enabled: true
+  # stats_path: pca_patch.pt, # 预先保存的 PCA 统计
+  # attn_path: "model.vit.encoder.layer.0.attention"
+  # r: 32       # PCA component
+  # whiten: true
+  # robust: false
+  # kernel: null       # 或 'rbf'
+  # nystrom_m: 256
+  # cka: true
+  # cka_every: 1
+  # cka_kernel: 'linear'
+
+  
+model:
+  name: vit
+  task_type: reg
+  num_labels: 1
+  image_size: 4096    
+  patch_size: 45
+  hidden_size: 16
+  num_hidden_layers: 6
+  num_attention_heads: 4
+  stride_ratio: 0.5
+  proj_fn: 'SW'
+
+train:
+  batch_size: 128
+  ep: 100
+  debug: 0
+  workers: 2
+
+loss: 
+  name: 'l1'
+
+opt:
+  type: 'adam'
+  lr: 0.001
+  lr_sch: plateau
+  factor: 0.8
+  patience: 2
+
+data:
+  # Define env var DATA_ROOT, e.g.:
+  # export DATA_ROOT=/datascope/subaru/user/swei20/data/bosz50000/z0
+  file_path: "${TRAIN_DIR}/dataset.h5"
+  val_path:  "${VAL_DIR}/dataset.h5"
+  test_path: "${TEST_DIR}/dataset.h5"
+  # file_path: '/datascope/subaru/user/swei20/data/bosz50000/test/mag215/train_100k/dataset.h5'
+  # val_path: '/datascope/subaru/user/swei20/data/bosz50000/mag215/train_1k/dataset.h5'
+  # test_path: '/datascope/subaru/user/swei20/data/bosz50000/mag215/val_1k/dataset.h5'
+  num_samples: 100000
+  num_test_samples: 1000
+  param: T_eff
+  label_norm: 'minmax' # 'standard', 'minmax', 'zscore', or 'none'
+
+mask:
+  mask_ratio: 0.85
+
+noise:
+  noise_level: 0
+
+project: 'vit-test'
