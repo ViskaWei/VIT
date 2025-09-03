@@ -279,10 +279,17 @@ class BaseDataModule(L.LightningDataModule):
         )
     
     def val_dataloader(self):
-        return DataLoader(self.val,
-                          batch_size=len(self.val),
-                          num_workers=self.num_workers,
-                          shuffle=False)
+        # Use a sane validation batch size instead of the entire dataset.
+        # Large datasets (e.g., 100k) will OOM or hit CUDA kernel limits if batched as one.
+        val_bs = min(self.batch_size if self.batch_size and self.batch_size > 0 else 1, len(self.val))
+        return DataLoader(
+            self.val,
+            batch_size=val_bs,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            persistent_workers=self.num_workers > 0,
+            shuffle=False,
+        )
     
     def test_dataloader(self):
         return DataLoader(self.test,
