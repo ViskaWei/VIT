@@ -1,3 +1,4 @@
+import os
 import h5py
 import torch
 import torch.nn as nn
@@ -8,7 +9,9 @@ from src.utils import calculate_rms, calculate_snr, create_new_voigt_line, add_n
 from torch.utils.data import Dataset, TensorDataset, DataLoader
 from src.basemodule import BaseModel, BaseLightningModule, BaseTrainer, BaseSpecDataset, BaseDataModule, SingleSpectrumNoiseDataset
 
-SAVE_DIR='/datascope/subaru/user/swei20/wandb'
+# Allow overriding local W&B run directory via env var
+# Default to a relative folder for portability
+SAVE_DIR = os.environ.get('WANDB_DIR', './wandb')
 SAVE_PATH = '/home/swei20/SirenSpec/checkpoints'
 MASK_PATH = '/datascope/subaru/user/swei20/model/bosz50000_mask.npy'
 
@@ -426,7 +429,8 @@ class SpecTrainer():
         if sweep: num_gpus = 1
         snr_patience = 100 if sweep else 500
         self.trainer = BaseTrainer(config=config.get('train', {}), logger=logger, num_gpus=num_gpus, sweep=sweep)  #
-        if not sweep: 
+        # Add checkpointing only when saving is enabled
+        if (config.get('train', {}).get('save', False)):
             checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(dirpath= SAVE_PATH, filename='{epoch}-{snr_valid:.0f}', save_top_k=1, monitor='val/snr', mode='max')
             self.trainer.callbacks.append(checkpoint_callback)
             
@@ -438,7 +442,7 @@ class Experiment:
     def __init__(self, config, use_wandb=False, num_gpus=None, sweep=False, ckpt_path=None):
         self.lightning_module = BlindspotLModule(config=config)
         self.lightning_module.sweep = sweep
-        if use_wandb:
+        if use_wandb and (config.get('train', {}).get('save', False)):
             if sweep:
                 logger = L.pytorch.loggers.WandbLogger(config=config, name=self.lightning_module.model.name, log_model=False, save_dir=SAVE_DIR) 
             else:

@@ -90,8 +90,9 @@ def parse_args():
     parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs to use")
     parser.add_argument("--debug", action='store_true', help="Enable debug mode")
     parser.add_argument("--ckpt", type=str, default=None, help="resume from checkpoint")
-    # wandb
+    # wandb / saving
     parser.add_argument("--wandb-project", type=str, default="wandb-name-test", help="Wandb project name")
+    parser.add_argument("--save", action='store_true', help="only when set, save checkpoints and log to W&B")
 
     args = parser.parse_args()
 
@@ -135,32 +136,38 @@ def main():
         stride_ratio = args.stride_ratio
     )
 
-    if not args.debug:
-        wandb_logger = WandbLogger(project=args.wandb_project, log_model=True, config=vars(args))
+    wandb_logger = None
+    if (not args.debug) and args.save:
+        import os
+        wandb_logger = WandbLogger(project=args.wandb_project, log_model=True, config=vars(args), save_dir=os.environ.get('WANDB_DIR', './wandb'))
 
     model = MyViT(config)
     lightning_model = LightningViTModel(model, config, args.task)
 
     # Define callbacks
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=f'checkpoints/{args.exp_name}',
-        filename='{epoch}-{val_loss:.2f}',
-        save_top_k=3,
-        monitor='val_loss',
-        mode='min',
-        every_n_epochs=args.save_model_every if args.save_model_every > 0 else 1
-    )
+    callbacks = []
+    if args.save:
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=f'checkpoints/{args.exp_name}',
+            filename='{epoch}-{val_loss:.2f}',
+            save_top_k=3,
+            monitor='val_loss',
+            mode='min',
+            every_n_epochs=args.save_model_every if args.save_model_every > 0 else 1
+        )
+        callbacks.append(checkpoint_callback)
     # Initialize the PyTorch Lightning Trainer
     trainer = L.Trainer(
         max_epochs=args.epochs,
         accelerator=args.device,
         devices=args.num_device,
         strategy='ddp' if args.gpus > 1 else 'auto',  # Use DistributedDataParallel for multi-GPU
-        callbacks=[checkpoint_callback],
+        callbacks=callbacks,
         default_root_dir=f'experiments/{args.exp_name}',
         fast_dev_run=args.debug,
+        logger=wandb_logger if wandb_logger is not None else False,
     )
-    if not args.debug: trainer.logger = wandb_logger
+    # No logger when --save is not set
     trainer.fit(lightning_model, train_dataloader, train_dataloader, ckpt_path=args.ckpt)  # Using same dataloader for train and val
     trainer.test(lightning_model, test_dataloader)
     

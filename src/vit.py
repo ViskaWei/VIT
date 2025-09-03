@@ -1,3 +1,4 @@
+import os
 import torch
 from torchmetrics import Accuracy, MeanAbsoluteError, R2Score
 import lightning as L
@@ -8,8 +9,9 @@ from src.basemodule import BaseLightningModule, BaseTrainer, BaseSpecDataset, Ba
 from src.utils import make_dummy_spectra
 
 
-# Use local paths to be portable across environments
-SAVE_DIR='./wandb'
+# Use env override for local W&B run files
+# Falls back to ./wandb in the project if not set
+SAVE_DIR = os.environ.get('WANDB_DIR', './wandb')
 SAVE_PATH = './checkpoints'
 # MASK_PATH = './bosz50000_mask.npy'
 
@@ -274,7 +276,8 @@ class SpecTrainer():
         #         kernel=p.get('cka_kernel', 'linear'),
         #     ))
         
-        if not sweep: 
+        # Add checkpointing only when saving is enabled
+        if (config.get('train', {}).get('save', False)):
             checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(dirpath= SAVE_PATH, filename='{epoch}-{acc_valid:.0f}', save_top_k=1, monitor=f'val_{monitor_name}', mode=monitor_mode)
             self.trainer.callbacks.append(checkpoint_callback)
             
@@ -300,11 +303,11 @@ class Experiment:
         self.data_module = ViTDataModule.from_config(config, test_data=test_data)
 
         self.lightning_module.sweep = sweep
-        if use_wandb:
+        if use_wandb and (config.get('train', {}).get('save', False)):
             if sweep:
                 logger = L.pytorch.loggers.WandbLogger(config=config, name=self.lightning_module.model.name, log_model=False, save_dir=SAVE_DIR) 
             else:
-                logger = L.pytorch.loggers.WandbLogger(project = config['project'], config=config, name=self.lightning_module.model.name, log_model=True, save_dir=SAVE_DIR)
+                logger = L.pytorch.loggers.WandbLogger(project = config['project'], config=config, name=self.lightning_module.model.name, log_model=False, save_dir=SAVE_DIR)
         else:
             logger = None
         # Choose monitor based on task

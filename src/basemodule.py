@@ -355,13 +355,14 @@ class BaseLightningModule(L.LightningModule):
 
 class BaseTrainer(L.Trainer):
     def __init__(self, config, logger=False, num_gpus=None, sweep=False):
+        # Saving behavior: only save when config['save'] is truthy
+        enable_checkpointing = bool(config.get('save', False))
+        # UI behavior can still depend on sweep mode
         if sweep:
             num_gpus = 1
-            enable_checkpointing = False
             enable_progress_bar = False
             enable_model_summary = False
         else:
-            enable_checkpointing = True
             enable_progress_bar = True
             enable_model_summary = True
         self.acc, self.device0 = self.select_device(num_gpus or config.get('gpus'))

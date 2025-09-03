@@ -22,6 +22,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='blindspot experiment')
     parser.add_argument('-f', '--config', type=str, help='config file')
     parser.add_argument('-w', '--wandb', type=int, help='use wandb logging', default=0)
+    parser.add_argument('--save', action='store_true', help='only when set, save checkpoints and log to W&B')
     parser.add_argument('-g', '--gpu', type=int, help='gpu number', default=torch.cuda.device_count())
     parser.add_argument('--debug', type=int, help='debug mode', default=0)
     parser.add_argument('--ckpt', type=str, help='path to checkpoint file', default=ckpt)
@@ -31,7 +32,10 @@ def main(args: argparse.Namespace) -> None:
     config = load_config(args.config or 'configs/vit.yaml')
     config['train']['gpus'] = args.gpu
     config['train']['debug'] = args.debug
-    Experiment(config, use_wandb=args.wandb, sweep=False, ckpt_path=args.ckpt, test_data=False).run()
+    # Only save when --save is provided
+    config['train']['save'] = bool(args.save)
+    use_wandb = 1 if args.save else 0
+    Experiment(config, use_wandb=use_wandb, sweep=False, ckpt_path=args.ckpt, test_data=False).run()
 
 if __name__ == "__main__":
     args = parse_args()

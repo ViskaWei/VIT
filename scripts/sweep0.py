@@ -4,7 +4,7 @@ import wandb
 from src.blindspot import Experiment
 
 os.environ['WANDB_ENTITY'] = 'viskawei-johns-hopkins-university'
-wandb_dir = "/datascope/subaru/user/swei20/wandb"
+wandb_dir = os.environ.get("WANDB_DIR", "./wandb")
 
 def main(config: Optional[Dict[str, Any]] = None) -> None:
     with wandb.init(dir=wandb_dir, save_code=False, settings=wandb.Settings(_disable_stats=True)) as run:
