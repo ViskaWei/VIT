@@ -39,7 +39,7 @@ class BaseDataset(Configurable, Dataset, ABC):
         self.num_test_samples = num_test_samples if num_test_samples is not None else min(10000, self.num_samples)
         self.indices = indices if indices is not None else [0, 1]
         self.root_dir = root_dir
-        # Optional target parameter to load from HDF; e.g., 'T_eff', 'log_g'
+        # Optional target parameter(s) to load from HDF; e.g., 'T_eff', 'log_g' or ['T_eff','log_g']
         self.param = param
         # Optional label normalization for regression: 'standard'|'zscore'|'minmax'|None
         self.label_norm = (label_norm or 'none').lower() if isinstance(label_norm, str) else 'none'
@@ -196,9 +196,23 @@ class BaseSpecDataset(MaskMixin, NoiseMixin, BaseDataset):
         df = pd.read_hdf(load_path)[:num_samples]
 
         if isinstance(self.param, str) and len(self.param) > 0:
-            if self.param not in df.columns:
-                raise KeyError(f"Requested param '{self.param}' not found in HDF columns: {list(df.columns)}")
-            self.param_values = df[self.param].values
+            # Support comma-separated multi-params in a string, e.g. "T_eff,log_g,M_H"
+            param_list = [p.strip() for p in self.param.split(',') if p.strip()]
+            if len(param_list) == 1:
+                if param_list[0] not in df.columns:
+                    raise KeyError(f"Requested param '{param_list[0]}' not found in HDF columns: {list(df.columns)}")
+                self.param_values = df[param_list[0]].values
+            else:
+                for p in param_list:
+                    if p not in df.columns:
+                        raise KeyError(f"Requested param '{p}' not found in HDF columns: {list(df.columns)}")
+                # Shape: (N, K)
+                self.param_values = df[param_list].values
+        elif isinstance(self.param, (list, tuple)) and len(self.param) > 0:
+            for p in self.param:
+                if p not in df.columns:
+                    raise KeyError(f"Requested param '{p}' not found in HDF columns: {list(df.columns)}")
+            self.param_values = df[list(self.param)].values
         else:
             # Backward-compatible behavior: load common parameters
             self.teff = df['T_eff'].values

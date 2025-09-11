@@ -72,8 +72,29 @@ def get_pca_config(config):
 
 
 def get_vit_config(config):
-    """Create a ViTConfig object from the provided config dict."""
+    """Create a ViTConfig object from the provided config dict.
+
+    For regression, if `data.param` is a comma-separated string or a list of parameter
+    names (e.g., ['T_eff', 'log_g']), dynamically set `num_labels` to its length.
+    """
     m = config['model']
+    d = config.get('data', {})
+    num_labels = int(m.get('num_labels', 1) or 1)
+    task = (m.get('task_type') or m.get('task') or 'cls').lower()
+    if task in ('reg', 'regression'):
+        p = d.get('param', None)
+        if isinstance(p, str) and len(p) > 0:
+            plist = [x.strip() for x in p.split(',') if x.strip()]
+            if len(plist) >= 1:
+                num_labels = len(plist)
+        elif isinstance(p, (list, tuple)) and len(p) > 0:
+            num_labels = len(p)
+        # Reflect back so downstream (e.g., metrics) can see it if they read config
+        try:
+            m['num_labels'] = num_labels
+        except Exception:
+            pass
+
     return ViTConfig(
         task_type=m['task_type'],
         image_size=m['image_size'],
@@ -93,7 +114,7 @@ def get_vit_config(config):
         is_encoder_decoder=False,
         use_mask_token=False,
         qkv_bias=True,
-        num_labels=m.get('num_labels', 1) or 1,
+        num_labels=num_labels,
     )
 
 
@@ -112,7 +133,8 @@ class MyViT(ViTPreTrainedModel, BaseModel):
             self.loss_fct = nn.CrossEntropyLoss()
             loss_name = 'ce'
         elif self.task_type == 'reg':  # regression
-            self.regressor = nn.Linear(config.hidden_size, 1)
+            # Output dimension equals number of regression targets
+            self.regressor = nn.Linear(config.hidden_size, config.num_labels)
             loss_name = loss_name or 'l2'
             self.loss_fct = nn.L1Loss() if ('l1' in (loss_name or '').lower()) else nn.MSELoss()
 

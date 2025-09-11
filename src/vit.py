@@ -84,9 +84,12 @@ class RegSpecDataset(BaseSpecDataset):
         super().load_data(stage)
         self.load_params(stage)
         # Enforce explicit `data.param` for regression targets
-        if not (isinstance(getattr(self, 'param', None), str) and len(self.param) > 0):
-            raise ValueError("Regression requires 'data.param' to be set in the config.")
-        self.labels = torch.tensor(self.param_values).float()
+        if not (
+            (isinstance(getattr(self, 'param', None), str) and len(self.param) > 0)
+            or (isinstance(getattr(self, 'param', None), (list, tuple)) and len(self.param) > 0)
+        ):
+            raise ValueError("Regression requires 'data.param' to be set in the config (string, comma-separated string, or list).")
+        self.labels = torch.tensor(self.param_values).float()  # shape: (N,) or (N,K)
         # Optional label normalization for regression
         self._maybe_normalize_labels(stage)
 
@@ -99,21 +102,34 @@ class RegSpecDataset(BaseSpecDataset):
         if kind not in ('standard', 'zscore', 'minmax'):
             return
         is_train = stage in (None, 'fit', 'train')
+        # Compute along batch dim; for multi-output K>1, stats are 1D tensors of length K
         if kind in ('standard', 'zscore'):
             if is_train or (self.label_mean is None or self.label_std is None):
-                self.label_mean = float(self.labels.mean().item())
-                self.label_std = float(self.labels.std(unbiased=False).item())
-            std = self.label_std if self.label_std is not None else 1.0
-            if std < eps: std = 1.0
+                self.label_mean = self.labels.mean(dim=0, keepdim=False)
+                self.label_std = self.labels.std(dim=0, unbiased=False, keepdim=False)
+            std = self.label_std.clone() if isinstance(self.label_std, torch.Tensor) else torch.tensor(self.label_std)
+            std = torch.where(std.abs() < eps, torch.ones_like(std), std)
             self.labels = (self.labels - self.label_mean) / std
         elif kind == 'minmax':
             if is_train or (self.label_min is None or self.label_max is None):
-                self.label_min = float(self.labels.min().item())
-                self.label_max = float(self.labels.max().item())
+                self.label_min = self.labels.min(dim=0, keepdim=False).values
+                self.label_max = self.labels.max(dim=0, keepdim=False).values
             denom = (self.label_max - self.label_min)
-            if abs(denom) < eps: denom = 1.0
+            denom = torch.where(denom.abs() < eps, torch.ones_like(denom), denom)
             self.labels = (self.labels - self.label_min) / denom
-        print(f"[{stage or 'all'} data] label normalization '{kind}': mean={self.label_mean}, std={self.label_std}, min={self.label_min}, max={self.label_max}")
+        # Lightweight log of scalar summaries for visibility
+        try:
+            m = self.label_mean if isinstance(self.label_mean, torch.Tensor) else None
+            s = self.label_std if isinstance(self.label_std, torch.Tensor) else None
+            mi = self.label_min if isinstance(self.label_min, torch.Tensor) else None
+            ma = self.label_max if isinstance(self.label_max, torch.Tensor) else None
+            def _fmt(x):
+                if x is None: return None
+                x = x.detach().cpu().flatten()
+                return [round(float(v), 4) for v in x.tolist()[:4]]  # show up to first 4 dims
+            print(f"[{stage or 'all'} data] label normalization '{kind}': mean={_fmt(m)}, std={_fmt(s)}, min={_fmt(mi)}, max={_fmt(ma)}")
+        except Exception:
+            pass
     
 #endregion --DATA-----------------------------------------------------------
 #region --DATAMODULE-----------------------------------------------------------
