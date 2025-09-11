@@ -104,7 +104,9 @@ def get_vit_config(config):
         num_hidden_layers=m['num_hidden_layers'],
         num_attention_heads=m['num_attention_heads'],
         intermediate_size=4 * m['hidden_size'],
-        stride_ratio=m['stride_ratio'],
+        stride_ratio=m.get('stride_ratio', 1),
+        # Optional explicit stride size; if provided, embedding layers will prefer it
+        stride_size=m.get('stride_size', None),
         proj_fn=m['proj_fn'],
         hidden_act="gelu",
         hidden_dropout_prob=0.1,
@@ -142,9 +144,12 @@ class MyViT(ViTPreTrainedModel, BaseModel):
         self.init_weights()
         # Compose a clear default model name (do NOT call BaseModel.__init__ here,
         # since it would invoke nn.Module.__init__ again and clear parameters.)
+        # Prefer explicit stride_size for naming if provided; otherwise use stride_ratio
+        _stride_used = getattr(config, 'stride_size', None)
+        stride_tag = int(_stride_used) if (_stride_used is not None and _stride_used) else config.stride_ratio
         full_model_name = (
             f'{model_name}_p{config.patch_size}_h{config.hidden_size}_l{config.num_hidden_layers}_'
-            f'a{config.num_attention_heads}_s{config.stride_ratio}_p{config.proj_fn}'
+            f'a{config.num_attention_heads}_s{stride_tag}_p{config.proj_fn}'
         )
         self._model_name = full_model_name
         self._loss_name = loss_name or 'train'
@@ -203,7 +208,9 @@ class MyWindowPatchEmbeddings(nn.Module):
         self.image_size = config.image_size # spectra length 
         self.patch_size = config.patch_size 
         self.num_channels = 1
-        self.stride_size = int(config.stride_ratio * self.patch_size)
+        # If explicit stride_size is provided and > 0, prefer it; else derive from stride_ratio
+        _stride_sz = getattr(config, 'stride_size', None)
+        self.stride_size = int(_stride_sz) if (_stride_sz is not None and int(_stride_sz) > 0) else int(config.stride_ratio * self.patch_size)
         self.num_patches = math.ceil((self.image_size - self.patch_size) / self.stride_size) + 1
         self.projection = nn.Linear(self.patch_size, config.hidden_size)
 
@@ -215,7 +222,8 @@ class MyWindowPatchEmbeddings(nn.Module):
         if x.size(1) < self.num_patches:
             padding = torch.zeros(batch_size, self.num_patches - x.size(1), self.patch_size, device=x.device)
             x = torch.cat([x, padding], dim=1)
-        x = x.view(batch_size, self.num_patches, self.patch_size)
+        # Ensure contiguous memory before reshape/linear to avoid MPS buffer errors
+        x = x.contiguous().reshape(batch_size, self.num_patches, self.patch_size)
         x = self.projection(x)
         return x  # (batch_size, num_patches, hidden_size)
 
@@ -227,7 +235,8 @@ class MyCNN1DPatchEmbeddings(nn.Module):
         self.image_size = config.image_size # spectra length = 2000
         self.patch_size = config.patch_size # patch_size = 100
         self.num_channels = 1
-        self.stride_size = int(config.stride_ratio * self.patch_size)
+        _stride_sz = getattr(config, 'stride_size', None)
+        self.stride_size = int(_stride_sz) if (_stride_sz is not None and int(_stride_sz) > 0) else int(config.stride_ratio * self.patch_size)
         self.num_patches = ((self.image_size - self.patch_size) // self.stride_size) + 1
         self.projection = nn.Conv1d(self.num_channels, config.hidden_size, kernel_size=self.patch_size, stride=self.stride_size)
     def forward(self, x):  

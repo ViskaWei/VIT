@@ -16,7 +16,7 @@ if [ -z "${DATA_ROOT:-}" ]; then
 fi
 
 start_time=$(date +%s)
-python ./scripts/run.py -f ./configs/vit.yaml -w 0 --debug 1
+python ./scripts/run.py -f "$CONFIG_DIR/test.yaml" -w 0 --debug 1
 
 end_time=$(date +%s)
 elapsed_time_1=$((end_time - start_time))
