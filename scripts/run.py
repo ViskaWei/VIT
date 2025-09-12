@@ -9,8 +9,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 os.environ['WANDB_ENTITY'] = 'viskawei-johns-hopkins-university'
-# os.environ['CUDA_VISIBLE_DEVICES']='1,2,3,4,5,6,7'
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+# Respect existing CUDA_VISIBLE_DEVICES if set by the launcher
+os.environ.setdefault('CUDA_VISIBLE_DEVICES', '0')
 
 
 from src.vit import Experiment
