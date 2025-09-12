@@ -124,7 +124,7 @@ def main():
     # Bring to CPU and save relevant stats
     V = V[:, :D].contiguous().cpu()  # (D, D)
     S = S[:D].contiguous().cpu()     # (D,)
-    # U = U[:D].contiguous().cpu()  # (M, D)
+    U = U.contiguous().cpu()  # (M, D)
     # Explained variance ratio from singular values (centered): proportional to S^2
     evr = (S ** 2)
     evr = evr / evr.sum() if float(evr.sum()) > 0 else evr
@@ -132,6 +132,7 @@ def main():
     out_path = os.path.join(os.environ.get("PCA_DIR", "./data/pca"), args.out or "pca_patch" + f"_{D}_s{step}.pt")
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     torch.save({
+        "U": U,  # projections as (M, k); here k=D
         "V": V,  # components as (D, k); here k=D
         "S": S,
         "explained_variance_ratio": evr,
