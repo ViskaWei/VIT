@@ -120,11 +120,17 @@ def main():
     D = int(args.patch_size)
     with torch.no_grad():
         # Compute up to D components; center=True gives PCA basis in V
-        U, S, V = torch.pca_lowrank(P, q=D, center=True)
+        try:
+            U, S, V = torch.pca_lowrank(P, q=D, center=True)
+        except:
+            dev = torch.device("cpu")
+            P = P.to(dev)
+            U, S, V = torch.pca_lowrank(P, q=D, center=True)
+
     # Bring to CPU and save relevant stats
     V = V[:, :D].contiguous().cpu()  # (D, D)
     S = S[:D].contiguous().cpu()     # (D,)
-    U = U.contiguous().cpu()  # (M, D)
+    U = U[:D].contiguous().cpu()  # (M, D)
     # Explained variance ratio from singular values (centered): proportional to S^2
     evr = (S ** 2)
     evr = evr / evr.sum() if float(evr.sum()) > 0 else evr
