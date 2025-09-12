@@ -8,6 +8,7 @@ set -Eeuo pipefail
 
 MODE="run"
 GPU_COUNT=1
+GPU_SET=0
 WANDB=1
 DEBUG=0
 EXTRA_ARGS=()
@@ -22,7 +23,7 @@ fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -g|--gpu)
-      GPU_COUNT="$2"; shift 2 ;;
+      GPU_COUNT="$2"; GPU_SET=1; shift 2 ;;
     --save)
       EXTRA_ARGS+=("--save"); shift ;;
     -w|--wandb)
@@ -63,7 +64,16 @@ if [ "$MACHINE" = "server8" ]; then
   source /srv/local/tmp/swei20/miniconda3/etc/profile.d/conda.sh
   conda activate viska-torch-3
   export ROOT="$ROOT_SERVER8"
-  export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+  # If user explicitly passed -g on server, treat it as GPU ID selector
+  if [ "$GPU_SET" = "1" ]; then
+    # Only set when not already constrained by caller
+    if [ -z "${CUDA_VISIBLE_DEVICES+x}" ]; then
+      export CUDA_VISIBLE_DEVICES="$GPU_COUNT"
+    fi
+    GPU_COUNT=1
+  else
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+  fi
   export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
 else
   # Local (or other) machine: use project venv if available
@@ -99,10 +109,10 @@ else
   PY="./scripts/run.py"
 fi
 
-echo "[launch] MACHINE=$MACHINE MODE=$MODE ROOT=$ROOT GPU_COUNT=$GPU_COUNT WANDB=$WANDB DEBUG=$DEBUG"
+echo "[launch] MACHINE=$MACHINE MODE=$MODE ROOT=$ROOT GPU_COUNT=$GPU_COUNT WANDB=$WANDB DEBUG=$DEBUG CVD=${CUDA_VISIBLE_DEVICES:-unset}"
 
 # Bash -u can complain on empty arrays; only expand when non-empty
-if [ ${#EXTRA_ARGS[@]:-0} -gt 0 ]; then
+if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
   python "$PY" -f "$CONFIG_FILE" -w "$WANDB" -g "$GPU_COUNT" --debug "$DEBUG" "${EXTRA_ARGS[@]}"
 else
   python "$PY" -f "$CONFIG_FILE" -w "$WANDB" -g "$GPU_COUNT" --debug "$DEBUG"
