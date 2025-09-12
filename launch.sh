@@ -101,5 +101,9 @@ fi
 
 echo "[launch] MACHINE=$MACHINE MODE=$MODE ROOT=$ROOT GPU_COUNT=$GPU_COUNT WANDB=$WANDB DEBUG=$DEBUG"
 
-python "$PY" -f "$CONFIG_FILE" -w "$WANDB" -g "$GPU_COUNT" --debug "$DEBUG" "${EXTRA_ARGS[@]}"
-
+# Bash -u can complain on empty arrays; only expand when non-empty
+if [ ${#EXTRA_ARGS[@]:-0} -gt 0 ]; then
+  python "$PY" -f "$CONFIG_FILE" -w "$WANDB" -g "$GPU_COUNT" --debug "$DEBUG" "${EXTRA_ARGS[@]}"
+else
+  python "$PY" -f "$CONFIG_FILE" -w "$WANDB" -g "$GPU_COUNT" --debug "$DEBUG"
+fi
