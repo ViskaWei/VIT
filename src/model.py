@@ -22,12 +22,18 @@ def complete_with_orthogonal(U: torch.Tensor, out_dim: int) -> torch.Tensor:
     return Q[:, :out_dim]
 
 def _load_V_matrix(pth: str, patch_dim: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor | None:
-    """Load a PCA/V matrix from a file and return a (patch_dim, k) tensor if possible.
+    """Load a PCA matrix for patch embedding init and return a (patch_dim, k) tensor.
+
+    Note: We intend to use the left singular vectors `U` from `U, S, Vt = svd(Data)`
+    as the replacement for the embedding projection (columns of `U`). Therefore
+    we first try to read keys like 'U' or 'components'. We still accept 'V'/'Vh'
+    for backward-compatibility, transposing if needed so the returned matrix has
+    shape (patch_dim, k).
 
     Accepts either:
     - a raw 2D tensor
-    - a dict containing a suitable tensor under common keys (e.g., 'V')
-    Falls back to scanning dict values for a tensor whose first/last dim equals patch_dim.
+    - a dict containing a suitable tensor
+    Falls back to scanning dict values for a tensor whose first/last dim equals `patch_dim`.
     """
     try:
         obj = torch.load(pth, weights_only=True, map_location="cpu")
@@ -47,42 +53,47 @@ def _load_V_matrix(pth: str, patch_dim: int, device: torch.device, dtype: torch.
             return t.t()
         return None
 
-    V = None
+    U = None
     if isinstance(obj, torch.Tensor):
-        V = _as_patch_by_k(obj)
+        U = _as_patch_by_k(obj)
     elif isinstance(obj, dict):
-        # Prefer explicit/common keys
-        for k in ("V", "components", "components_", "eigvecs", "eigvec", "basis", "A", "Vh", "vh"):
+        # Prefer U / components first (we use U from SVD(Data))
+        for k in ("U", "components", "components_", "scores", "basis", "eigvecs", "eigvec", "A", "V", "Vh", "vh"):
             if k in obj and isinstance(obj[k], torch.Tensor):
-                V = _as_patch_by_k(obj[k])
-                if V is not None:
+                U = _as_patch_by_k(obj[k])
+                if U is not None:
                     break
         # Otherwise scan all tensor values
-        if V is None:
+        if U is None:
             for v in obj.values():
                 if isinstance(v, torch.Tensor):
                     cand = _as_patch_by_k(v)
                     if cand is not None:
-                        V = cand
+                        U = cand
                         break
     else:
         # Try attribute access (e.g., a simple namespace with .V)
         try:
-            maybe = getattr(obj, 'V', None)
+            maybe = getattr(obj, 'U', None)
             if isinstance(maybe, torch.Tensor):
-                V = _as_patch_by_k(maybe)
+                U = _as_patch_by_k(maybe)
+            else:
+                maybe = getattr(obj, 'V', None)
+                if isinstance(maybe, torch.Tensor):
+                    U = _as_patch_by_k(maybe)
         except Exception:
-            V = None
+            U = None
 
-    if V is None:
-        print(f"[embed-warmup] No usable V found in '{pth}' for patch_dim={patch_dim}")
+    if U is None:
+        print(f"[embed-warmup] No usable U/components found in '{pth}' for patch_dim={patch_dim}")
         return None
 
-    return V.to(device=device, dtype=dtype, copy=False)
+    return U.to(device=device, dtype=dtype, copy=False)
 
 def _apply_embed_pca(model: nn.Module, embed_cfg: dict):
     """If model uses sliding-window Linear patch embeddings, replace its projection
-    weights with PCA V columns. Completes with an orthogonal basis if needed.
+    weights with PCA components (we use U from SVD(Data)). Completes with an
+    orthogonal basis if needed.
     """
     try:
         emb = model.vit.embeddings.patch_embeddings
