@@ -21,6 +21,95 @@ def complete_with_orthogonal(U: torch.Tensor, out_dim: int) -> torch.Tensor:
     Q, _ = torch.linalg.qr(A)  # (in_dim, out_dim)
     return Q[:, :out_dim]
 
+def _load_V_matrix(pth: str, patch_dim: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor | None:
+    """Load a PCA/V matrix from a file and return a (patch_dim, k) tensor if possible.
+
+    Accepts either:
+    - a raw 2D tensor
+    - a dict containing a suitable tensor under common keys (e.g., 'V')
+    Falls back to scanning dict values for a tensor whose first/last dim equals patch_dim.
+    """
+    try:
+        obj = torch.load(pth, weights_only=True, map_location="cpu")
+    except Exception:
+        try:
+            obj = torch.load(pth, map_location="cpu")
+        except Exception as e:
+            print(f"[embed-warmup] Failed to load PCA file '{pth}': {e}")
+            return None
+
+    def _as_patch_by_k(t: torch.Tensor) -> torch.Tensor | None:
+        if t.dim() != 2:
+            return None
+        if t.shape[0] == patch_dim:
+            return t
+        if t.shape[1] == patch_dim:
+            return t.t()
+        return None
+
+    V = None
+    if isinstance(obj, torch.Tensor):
+        V = _as_patch_by_k(obj)
+    elif isinstance(obj, dict):
+        # Prefer explicit/common keys
+        for k in ("V", "components", "components_", "eigvecs", "eigvec", "basis", "A", "Vh", "vh"):
+            if k in obj and isinstance(obj[k], torch.Tensor):
+                V = _as_patch_by_k(obj[k])
+                if V is not None:
+                    break
+        # Otherwise scan all tensor values
+        if V is None:
+            for v in obj.values():
+                if isinstance(v, torch.Tensor):
+                    cand = _as_patch_by_k(v)
+                    if cand is not None:
+                        V = cand
+                        break
+    else:
+        # Try attribute access (e.g., a simple namespace with .V)
+        try:
+            maybe = getattr(obj, 'V', None)
+            if isinstance(maybe, torch.Tensor):
+                V = _as_patch_by_k(maybe)
+        except Exception:
+            V = None
+
+    if V is None:
+        print(f"[embed-warmup] No usable V found in '{pth}' for patch_dim={patch_dim}")
+        return None
+
+    return V.to(device=device, dtype=dtype, copy=False)
+
+def _apply_embed_pca(model: nn.Module, embed_cfg: dict):
+    """If model uses sliding-window Linear patch embeddings, replace its projection
+    weights with PCA V columns. Completes with an orthogonal basis if needed.
+    """
+    try:
+        emb = model.vit.embeddings.patch_embeddings
+    except Exception:
+        return
+    proj = getattr(emb, 'projection', None)
+    if not isinstance(proj, nn.Linear):
+        # Only applies to SW/Linear patch embedding
+        return
+    pth = embed_cfg.get('embed_pca_path', 'pca_patch.pt')
+    patch_dim = int(getattr(emb, 'patch_size', proj.in_features))
+    hidden = int(getattr(model.config, 'hidden_size', proj.out_features))
+    V = _load_V_matrix(pth, patch_dim, device=proj.weight.device, dtype=proj.weight.dtype)
+    if V is None:
+        return
+    # Use as many columns as available, then complete to hidden size if needed
+    r = min(hidden, V.shape[1])
+    U = V[:, :r].contiguous()  # (patch_dim, r)
+    if r < hidden:
+        U = complete_with_orthogonal(U, out_dim=hidden)  # (patch_dim, hidden)
+    # Set weights so that y = x @ V[:, :hidden] gives PCA coefficients
+    with torch.no_grad():
+        proj.weight.data.copy_(U.t())  # (hidden, patch_dim)
+        if proj.bias is not None:
+            proj.bias.zero_()
+    print(f"[embed-warmup] Initialized patch projection from PCA: '{pth}' -> weight {tuple(proj.weight.shape)}")
+
 def get_model(config):
     """Build ViT or ViT with a PCA-initialized global-attention front-end."""
     warmup_cfg = get_pca_config(config)
@@ -49,7 +138,7 @@ def get_model(config):
         if pca_stats is None:
             qk_freeze_epochs = 0
         
-        return GlobalAttnViT(
+        model = GlobalAttnViT(
             vit_config,
             pca_stats=pca_stats,
             loss_name=loss_name,
@@ -57,8 +146,17 @@ def get_model(config):
             use_lora=use_lora,
             qk_freeze_epochs=qk_freeze_epochs,
         )
+    else:
+        model = MyViT(vit_config, loss_name=loss_name)
 
-    return MyViT(vit_config, loss_name=loss_name)
+    # Optional: patch-embedding PCA init
+    try:
+        if bool(warmup_cfg.get('embed', False)):
+            _apply_embed_pca(model, warmup_cfg)
+    except Exception as e:
+        print(f"[embed-warmup] Skipped due to error: {e}")
+
+    return model
 
 def get_vit_pretrain_model(config):
     vit_config = get_vit_config(config)
