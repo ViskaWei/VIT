@@ -33,8 +33,8 @@ def main(args: argparse.Namespace) -> None:
     config['train']['gpus'] = args.gpu
     config['train']['debug'] = args.debug
     use_wandb = bool(args.wandb)
-    # Only save when --save is provided
-    config['train']['save'] = bool(args.save)
+    # Respect config 'train.save' and allow CLI to turn it on
+    config['train']['save'] = bool(config.get('train', {}).get('save', False) or args.save)
     Experiment(config, use_wandb=use_wandb, sweep=False, ckpt_path=args.ckpt, test_data=False).run()
 
 if __name__ == "__main__":

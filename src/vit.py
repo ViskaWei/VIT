@@ -12,7 +12,8 @@ from src.utils import make_dummy_spectra
 # Use env override for local W&B run files
 # Falls back to ./wandb in the project if not set
 SAVE_DIR = os.environ.get('WANDB_DIR', './wandb')
-SAVE_PATH = './checkpoints'
+# Checkpoint directory: read from env CHECKPOINT_DIR, fallback to ./checkpoints
+CKPT_DIR = os.environ.get('CKPT_DIR', './checkpoints')
 # MASK_PATH = './bosz50000_mask.npy'
 
 #region --DATA-----------------------------------------------------------
@@ -294,7 +295,19 @@ class SpecTrainer():
         
         # Add checkpointing only when saving is enabled
         if (config.get('train', {}).get('save', False)):
-            checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(dirpath= SAVE_PATH, filename='{epoch}-{acc_valid:.0f}', save_top_k=1, monitor=f'val_{monitor_name}', mode=monitor_mode)
+            # Build filename template using the actual monitored metric name
+            metric_key = f"val_{monitor_name}"
+            filename_tmpl = '{epoch}-' + '{' + f'{metric_key}:.4f' + '}'
+            # Ensure dir exists (ModelCheckpoint will also create it, but this is explicit)
+            os.makedirs(CKPT_DIR, exist_ok=True)
+            checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(
+                dirpath=CKPT_DIR,
+                filename=filename_tmpl,
+                save_top_k=1,
+                monitor=metric_key,
+                mode=monitor_mode,
+                save_last=True,
+            )
             self.trainer.callbacks.append(checkpoint_callback)
             
         earlystopping_callback = L.pytorch.callbacks.EarlyStopping(monitor=f'val_{monitor_name}', patience=patience, mode=monitor_mode, divergence_threshold=1,)

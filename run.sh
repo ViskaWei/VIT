@@ -35,7 +35,8 @@ if [ -z "${DATA_ROOT:-}" ]; then
 fi
 
 start_time=$(date +%s)
-python ./scripts/test.py -f ./configs/vit.yaml -w 0 --debug 1
+# Enable W&B and saving by default; disable fast_dev_run for real training
+python ./scripts/run.py -f "$CONFIG_DIR/vit.yaml" -w 1 --save --debug 0
 
 end_time=$(date +%s)
 elapsed_time_1=$((end_time - start_time))
