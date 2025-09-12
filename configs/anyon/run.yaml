@@ -6,6 +6,8 @@ warmup:
   # r: 128      # Low-rank dimension for Q/K/V (try 128 or 64)
   # freeze_qk_epochs: 5
   # lora: true  # if true, use low-rank (D->r->D) projections for Q/K/V
+  # enabled: true
+  # stats_path: pca_patch.pt, # 预先保存的 PCA 统计
   # attn_path: "model.vit.encoder.layer.0.attention"
   # whiten: true
   # robust: false
@@ -19,22 +21,21 @@ warmup:
 model:
   name: vit
   task_type: reg
-  num_labels: 1
+  num_labels: 3
   image_size: 4096    
   patch_size: 32
   hidden_size: 32
   num_hidden_layers: 2
   num_attention_heads: 1
-  # stride_ratio: 1
-  # Optional: explicit stride size (overrides stride_ratio when > 0)
   stride_size: 32
   proj_fn: 'SW'
 
 train:
-  batch_size: 50
-  ep: 2
+  batch_size: 128
+  ep: 1
   debug: 0
   workers: 10
+  save: false
   # precision: '16-mixed'   # uncomment to reduce memory further
 
 loss: 
@@ -58,7 +59,7 @@ data:
   # test_path: '/datascope/subaru/user/swei20/data/bosz50000/mag215/val_1k/dataset.h5'
   num_samples: 100
   num_test_samples: 100
-  param: T_eff
+  param: T_eff, log_g, M_H
   label_norm: 'minmax' # 'standard', 'minmax', 'zscore', or 'none'
 
 mask:

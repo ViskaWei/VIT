@@ -36,7 +36,7 @@ fi
 
 start_time=$(date +%s)
 # Enable W&B and saving by default; disable fast_dev_run for real training
-python ./scripts/run.py -f "$CONFIG_DIR/run.yaml" -w 1 --debug 0
+python ./scripts/run.py -f "$CONFIG_DIR/vit.yaml" -w 1 --save --debug 0
 
 end_time=$(date +%s)
 elapsed_time_1=$((end_time - start_time))

@@ -17,7 +17,7 @@ fi
 
 start_time=$(date +%s)
 # Enable W&B and saving by default; disable fast_dev_run for real training
-python ./scripts/test.py -f "$CONFIG_DIR/test.yaml" -w 1 --save --debug 0
+python ./scripts/test.py -f "$CONFIG_DIR/test.yaml" -w 1 --debug 1
 
 end_time=$(date +%s)
 elapsed_time_1=$((end_time - start_time))
