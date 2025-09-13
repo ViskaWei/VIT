@@ -21,12 +21,12 @@ def complete_with_orthogonal(U: torch.Tensor, out_dim: int) -> torch.Tensor:
     Q, _ = torch.linalg.qr(A)  # (in_dim, out_dim)
     return Q[:, :out_dim]
 
-def _load_V_matrix(pth: str, patch_dim: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor | None:
+def _load_U_matrix(pth: str, patch_dim: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor | None:
     """Load a PCA matrix for patch embedding init and return a (patch_dim, k) tensor.
 
-    Note: We intend to use the principal axes `V` (feature-space basis) from `U, S, Vt = svd(Data)`
-    as the replacement for the embedding projection (columns of `V`). Therefore
-    we first try to read keys like 'V' or 'components'. We still accept 'U'/'Vh'
+    Note: We intend to use the left singular vectors `U` from `U, S, Vt = svd(Data)`
+    as the replacement for the embedding projection (columns of `U`). Therefore
+    we first try to read keys like 'U' or 'components'. We still accept 'V'/'Vh'
     for backward-compatibility, transposing if needed so the returned matrix has
     shape (patch_dim, k).
 
@@ -53,18 +53,18 @@ def _load_V_matrix(pth: str, patch_dim: int, device: torch.device, dtype: torch.
             return t.t()
         return None
 
-    V_mat = None
+    U = None
     if isinstance(obj, torch.Tensor):
-        V_mat = _as_patch_by_k(obj)
+        U = _as_patch_by_k(obj)
     elif isinstance(obj, dict):
-        # Prefer U / components first (we use V from SVD(Data))
-        for k in ("V", "components", "components_", "eigvecs", "eigvec", "basis", "Vh", "vh", "U", "scores", "A"):
+        # Prefer U / components first (we use U from SVD(Data))
+        for k in ("U", "components", "components_", "scores", "basis", "eigvecs", "eigvec", "A", "V", "Vh", "vh"):
             if k in obj and isinstance(obj[k], torch.Tensor):
-                V_mat = _as_patch_by_k(obj[k])
-                if V_mat is not None:
+                U = _as_patch_by_k(obj[k])
+                if U is not None:
                     break
         # Otherwise scan all tensor values
-        if V_mat is None:
+        if U is None:
             for v in obj.values():
                 if isinstance(v, torch.Tensor):
                     cand = _as_patch_by_k(v)
@@ -82,17 +82,17 @@ def _load_V_matrix(pth: str, patch_dim: int, device: torch.device, dtype: torch.
                 if isinstance(maybe, torch.Tensor):
                     U = _as_patch_by_k(maybe)
         except Exception:
-            V_mat = None
+            U = None
 
-    if V_mat is None:
-        print(f"[embed-warmup] No usable V/components found in '{pth}' for patch_dim={patch_dim}")
+    if U is None:
+        print(f"[embed-warmup] No usable U/components found in '{pth}' for patch_dim={patch_dim}")
         return None
 
-    return V_mat.to(device=device, dtype=dtype, copy=False)
+    return U.to(device=device, dtype=dtype, copy=False)
 
 def _apply_embed_pca(model: nn.Module, embed_cfg: dict):
     """If model uses sliding-window Linear patch embeddings, replace its projection
-    weights with PCA components (we use V from SVD(Data)). Completes with an
+    weights with PCA components (we use U from SVD(Data)). Completes with an
     orthogonal basis if needed.
     """
     try:
@@ -106,47 +106,17 @@ def _apply_embed_pca(model: nn.Module, embed_cfg: dict):
     pth = embed_cfg.get('embed_pca_path', 'pca_patch.pt')
     patch_dim = int(getattr(emb, 'patch_size', proj.in_features))
     hidden = int(getattr(model.config, 'hidden_size', proj.out_features))
-    V = _load_V_matrix(pth, patch_dim, device=proj.weight.device, dtype=proj.weight.dtype)  # (patch_dim, r_like)
-    if V is None:
+    U = _load_U_matrix(pth, patch_dim, device=proj.weight.device, dtype=proj.weight.dtype) # (patch_dim, rlike)
+    if U is None:
         return
     # Use as many columns as available, then complete to hidden size if needed
-    r = min(hidden, V.shape[1])
-    V = V[:, :r].contiguous()  # (patch_dim, r)
+    r = min(hidden, U.shape[1])
+    U = U[:, :r].contiguous()  # (patch_dim, r)
     if r < hidden:
-        V = complete_with_orthogonal(V, out_dim=hidden)  # (patch_dim, hidden)
-    # Set weights so that y = x @ V[:, :hidden] gives PCA coefficients (if x is centered)
-    with torch.no_grad():
-        proj.weight.data.copy_(V.t())  # (hidden, patch_dim)
-        if proj.bias is not None:
-            proj.bias.zero_()
-    print(f"[embed-warmup] Initialized patch projection from PCA (V): '{pth}' -> weight {tuple(proj.weight.shape)}")
-
-    """If model uses sliding-window Linear patch embeddings, replace its projection
-    weights with PCA components (we use V from SVD(Data)). Completes with an
-    orthogonal basis if needed.
-    """
-    try:
-        emb = model.vit.embeddings.patch_embeddings
-    except Exception:
-        return
-    proj = getattr(emb, 'projection', None)
-    if not isinstance(proj, nn.Linear):
-        # Only applies to SW/Linear patch embedding
-        return
-    pth = embed_cfg.get('embed_pca_path', 'pca_patch.pt')
-    patch_dim = int(getattr(emb, 'patch_size', proj.in_features))
-    hidden = int(getattr(model.config, 'hidden_size', proj.out_features))
-    V = _load_V_matrix(pth, patch_dim, device=proj.weight.device, dtype=proj.weight.dtype) # (patch_dim, rlike)
-    if V_mat is None:
-        return
-    # Use as many columns as available, then complete to hidden size if needed
-    r = min(hidden, V.shape[1])
-    V = V[:, :r].contiguous()  # (patch_dim, r)
-    if r < hidden:
-        V = complete_with_orthogonal(V, out_dim=hidden)  # (patch_dim, hidden)
+        U = complete_with_orthogonal(U, out_dim=hidden)  # (patch_dim, hidden)
     # Set weights so that y = x @ V[:, :hidden] gives PCA coefficients
     with torch.no_grad():
-        proj.weight.data.copy_(V.t())  # (hidden, patch_dim)
+        proj.weight.data.copy_(U.t())  # (hidden, patch_dim)
         if proj.bias is not None:
             proj.bias.zero_()
     print(f"[embed-warmup] Initialized patch projection from PCA: '{pth}' -> weight {tuple(proj.weight.shape)}")
@@ -170,7 +140,7 @@ def get_model(config):
             if isinstance(loaded, dict):
                 pca_stats = loaded
             else:
-                pca_stats = {"V": loaded}
+                pca_stats = {"U": loaded}
             # Optionally freeze Q/K for the first N epochs (train only V + downstream)
         else:
             pca_stats = None
@@ -433,74 +403,94 @@ class GlobalAttentionLayer(nn.Module):
             self.q_lin = nn.Linear(input_dim, input_dim, bias=False)
             self.k_lin = nn.Linear(input_dim, input_dim, bias=False)
             self.v_lin = nn.Linear(input_dim, input_dim, bias=False)
-        
         self.softmax = nn.Softmax(dim=-1)
 
-        # PCA initialization for Q/K with V (feature-space basis)
-        if pca_stats is not None:
-            # Accept common keys: V, components, components_, Vh/vh (transpose), U (compat when computed on P^T)
-            if isinstance(pca_stats, dict):
-                cand = None
-                cand_key = None
-                for k in ("V", "components", "components_", "eigvecs", "eigvec", "basis", "Vh", "vh", "U"):
-                    if k in pca_stats and isinstance(pca_stats[k], torch.Tensor):
-                        cand = pca_stats[k]
-                        cand_key = k
-                        break
-                if cand is not None:
-                    V = cand
-                    if V.dim() != 2:
-                        raise ValueError("PCA basis must be 2D")
-                    # We want (D, r_like)
-                    if V.size(0) == self.input_dim and V.size(1) <= self.input_dim:
-                        V_mat = V.contiguous()
-                        inferred_r = V.size(1)
-                    elif V.size(1) == self.input_dim and V.size(0) <= self.input_dim:
-                        V_mat = V.t().contiguous()
-                        inferred_r = V.size(0)
-                    else:
-                        raise ValueError(f"Unexpected PCA basis shape {tuple(V.shape)} for input_dim={self.input_dim} (key={cand_key})")
+        # PCA initialization for Q/K
+        if pca_stats is not None and ("Vt" in pca_stats):
+            U = pca_stats["Vt"]  # U may be (r, D) or (D, r)
+            if U.dim() != 2:
+                raise ValueError("PCA U must be a 2D tensor")
+            if U.size(0) == self.input_dim and U.size(1) <= self.input_dim:
+                U_mat = U  # (D, r_like)
+                inferred_r = U.size(1)
+            elif U.size(1) == self.input_dim and U.size(0) <= self.input_dim:
+                U_mat = U.t()  # transpose to (D, r_like)
+                inferred_r = U.size(0)
+            else:
+                raise ValueError(f"Unexpected PCA U shape {tuple(U.shape)} for input_dim={self.input_dim}")
 
-                    if self.use_lora:
-                        use_r = min(self.rank, inferred_r)
-                        V_mat = V_mat[:, :use_r]  # (D, use_r)
-                        # down = V^T, up = V  => orthogonal projector onto top-r subspace
-                        self.q_down.weight.data.zero_()
-                        self.q_up.weight.data.zero_()
-                        self.k_down.weight.data.zero_()
-                        self.k_up.weight.data.zero_()
-                        self.q_down.weight.data[:use_r, :].copy_(V_mat.t())
-                        self.q_up.weight.data[:, :use_r].copy_(V_mat)
-                        self.k_down.weight.data[:use_r, :].copy_(V_mat.t())
-                        self.k_up.weight.data[:, :use_r].copy_(V_mat)
-                        # Initialize V branch orthogonally
-                        nn.init.orthogonal_(self.v_down.weight)
-                        nn.init.orthogonal_(self.v_up.weight)
-                    else:
-                        # Full matrix: put top-r components in the leading rows
-                        nn.init.orthogonal_(self.q_lin.weight)
-                        nn.init.orthogonal_(self.k_lin.weight)
-                        keep_r = min(inferred_r, self.r or inferred_r)
-                        self.q_lin.weight.data[:keep_r, :].copy_(V_mat.t()[:keep_r, :])
-                        self.k_lin.weight.data[:keep_r, :].copy_(V_mat.t()[:keep_r, :])
-                        nn.init.orthogonal_(self.v_lin.weight)
+            if self.use_lora:
+                use_r = min(self.rank, inferred_r)
+                U_mat = U_mat[:, :use_r]  # (D, use_r)
+                # Set down = U^T, up = U so that W ≈ U @ U^T (orthogonal projector)
+                self.q_down.weight.data.zero_()
+                self.q_up.weight.data.zero_()
+                self.k_down.weight.data.zero_()
+                self.k_up.weight.data.zero_()
+                self.q_down.weight.data[:use_r, :].copy_(U_mat.t())
+                self.q_up.weight.data[:, :use_r].copy_(U_mat)
+                self.k_down.weight.data[:use_r, :].copy_(U_mat.t())
+                self.k_up.weight.data[:, :use_r].copy_(U_mat)
+                # Initialize V low-rank orthogonally
+                nn.init.orthogonal_(self.v_down.weight)
+                nn.init.orthogonal_(self.v_up.weight)
+            else:
+                # Full matrix: place PCA vectors in top rows of Q/K
+                nn.init.orthogonal_(self.q_lin.weight)
+                nn.init.orthogonal_(self.k_lin.weight)
+                keep_r = min(inferred_r, self.r or inferred_r)
+                self.q_lin.weight.data[:keep_r, :].copy_(U_mat.t()[:keep_r, :])
+                self.k_lin.weight.data[:keep_r, :].copy_(U_mat.t()[:keep_r, :])
+                nn.init.orthogonal_(self.v_lin.weight)
 
-                    # Store explained variance up to r if available
-                    self.explained_variance_at_r = None
-                    try:
-                        if isinstance(pca_stats, dict) and ("explained_variance_ratio" in pca_stats):
-                            evr = pca_stats["explained_variance_ratio"]
-                            use_val = (self.rank if self.use_lora else (self.r or evr.shape[0]))
-                            keep_r = min(int(use_val), int(evr.shape[0]))
-                            self.explained_variance_at_r = float(evr[:keep_r].sum().item())
-                        elif isinstance(pca_stats, dict) and ("S" in pca_stats):
-                            S = pca_stats["S"]
-                            total_var = float((S ** 2).sum().item())
-                            use_val = (self.rank if self.use_lora else (self.r or S.shape[0]))
-                            keep_r = min(int(use_val), int(S.shape[0]))
-                            self.explained_variance_at_r = float((S[:keep_r] ** 2).sum().item() / (total_var + 1e-12))
-                    except Exception:
-                        pass
+            # Store explained variance up to r if available
+            self.explained_variance_at_r = None
+            try:
+                if isinstance(pca_stats, dict) and ("explained_variance_ratio" in pca_stats):
+                    evr = pca_stats["explained_variance_ratio"]
+                    use_val = (self.rank if self.use_lora else (self.r or evr.shape[0]))
+                    keep_r = min(int(use_val), int(evr.shape[0]))
+                    self.explained_variance_at_r = float(evr[:keep_r].sum().item())
+                elif isinstance(pca_stats, dict) and ("S" in pca_stats):
+                    S = pca_stats["S"]
+                    total_var = float((S ** 2).sum().item())
+                    use_val = (self.rank if self.use_lora else (self.r or S.shape[0]))
+                    keep_r = min(int(use_val), int(S.shape[0]))
+                    num = float((S[:keep_r] ** 2).sum().item())
+                    self.explained_variance_at_r = num / total_var if total_var > 0 else None
+            except Exception:
+                self.explained_variance_at_r = None
+        else:
+            # Random init depending on mode
+            if self.use_lora:
+                nn.init.orthogonal_(self.q_down.weight)
+                nn.init.orthogonal_(self.q_up.weight)
+                nn.init.orthogonal_(self.k_down.weight)
+                nn.init.orthogonal_(self.k_up.weight)
+                nn.init.orthogonal_(self.v_down.weight)
+                nn.init.orthogonal_(self.v_up.weight)
+            else:
+                std = 0.02
+                nn.init.trunc_normal_(self.q_lin.weight, std=std)
+                nn.init.trunc_normal_(self.k_lin.weight, std=std)
+                nn.init.trunc_normal_(self.v_lin.weight, std=std)
+            self.explained_variance_at_r = None
+
+    def q_proj(self, x):
+        if self.use_lora:
+            return self.q_up(self.q_down(x))
+        return self.q_lin(x)
+
+    def k_proj(self, x):
+        if self.use_lora:
+            return self.k_up(self.k_down(x))
+        return self.k_lin(x)
+
+    def v_proj(self, x):
+        if self.use_lora:
+            return self.v_up(self.v_down(x))
+        return self.v_lin(x)
+
     def forward(self, x):
         """
         Supports:
@@ -542,7 +532,7 @@ class GlobalAttnViT(MyViT):
 
     def __init__(self, config, pca_stats=None, loss_name=None, model_name="GAtt_ViT", r: int | None = None, use_lora: bool = False, qk_freeze_epochs: int = 0):
         tag = (f"Lo{r}" if use_lora else f"Fc{r}") if pca_stats is not None else ("LoRD" if use_lora else "FcRD")
-        model_name = f"GV{tag}_fz{qk_freeze_epochs}_{model_name}"
+        model_name = f"Gpca{tag}_fz{qk_freeze_epochs}_{model_name}"
         super().__init__(config, loss_name=loss_name, model_name=model_name)
         self.attn = GlobalAttentionLayer(input_dim=config.image_size, pca_stats=pca_stats, r=r, use_lora=use_lora)
         # Freeze Q/K for the first N epochs if requested

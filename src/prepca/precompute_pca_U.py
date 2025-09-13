@@ -1,7 +1,7 @@
 """CLI to precompute PCA basis for 1D patch embeddings and save to .pt
 
 This computes PCA over length-`patch_size` windows taken from spectra, then saves
-principal components under key 'V' (columns of V are feature-space PCs) so they can initialize the linear patch
+principal components under key 'V' so they can initialize the linear patch
 projection in the embedding layer.
 
 Examples:
@@ -117,22 +117,20 @@ def main():
            else torch.device("cpu"))
     P = P.to(dev)
 
-    # Compute per-feature mean for (optional) bias init
-    mean = P.mean(dim=0).cpu()  # (D,)
-
     D = int(args.patch_size)
     with torch.no_grad():
         # Compute up to D components; center=True gives PCA basis in V
         try:
-            U, S, V = torch.pca_lowrank(P, q=D, center=True)
+            U, S, V = torch.pca_lowrank(P.T, q=D, center=True)
         except:
             dev = torch.device("cpu")
             P = P.to(dev)
-            U, S, V = torch.pca_lowrank(P, q=D, center=True)
+            U, S, V = torch.pca_lowrank(P.T, q=D, center=True)
 
-        # PCA computed on P (M x D); V is (D, D), columns are PCs in feature space
+    # if  P.size is (Number of total patches, Patch Size/Feature Size)
+    # then we feed in P.T ( Number of features, Num of samples,) U is (Patch Size/Feature Size, D), S is (D,), V is (D, D)
     # Bring to CPU and save relevant stats
-    V = V.contiguous().cpu()  # (D, D) columns = PCs
+    V = V.contiguous().cpu()  # (D, D)
     S = S[:D].contiguous().cpu()     # (D,)
     U = U[:, :D].contiguous().cpu()  # (M, D)
     # Explained variance ratio from singular values (centered): proportional to S^2
@@ -142,10 +140,9 @@ def main():
     out_path = os.path.join(os.environ.get("PCA_DIR", "./data/pca"), args.out or "pca_patch" + f"_{D}_s{step}.pt")
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     torch.save({
-        "U": U,  # left singular vectors for samples (M, k); *not* used for embedding weights
-        "V": V,  # principal components (D, k); columns = PCs used for embedding weights
+        "U": U,  # projections as (M, k); here k=D
+        "V": V,  # components as (D, k); here k=D
         "S": S,
-        "mean": mean,
         "explained_variance_ratio": evr,
         "patch_size": D,
         "step": step,
@@ -169,7 +166,7 @@ def main():
             k = min(10, V.shape[1])
             plt.figure()
             for i in range(k):
-                plt.plot(V[:, i].numpy() + 0.01* i, label=f"PC{i+1}")
+                plt.plot(U[:, i].numpy() + 0.01* i, label=f"PC{i+1}")
             plt.title('Top PCA components (offset)')
             plt.tight_layout()
             plt.savefig(base + "_top10.png", dpi=150)

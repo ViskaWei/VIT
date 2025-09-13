@@ -1,6 +1,6 @@
 warmup:
   embed: true
-  embed_pca_path: pca_patch_32_s32.pt
+  embed_pca_path: ${PCA_DIR}/pca_patch_32_s32.pt
   global: false
   # global_pca_path: ${PCA_DIR}/pca_4096.pt   # could be a tensor U or dict with {'U', 'S', 'explained_variance_ratio'}
   # r: 128      # Low-rank dimension for Q/K/V (try 128 or 64)
