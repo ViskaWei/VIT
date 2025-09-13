@@ -57,7 +57,7 @@ def _load_V_matrix(pth: str, patch_dim: int, device: torch.device, dtype: torch.
     if isinstance(obj, torch.Tensor):
         V_mat = _as_patch_by_k(obj)
     elif isinstance(obj, dict):
-        # Prefer U / components first (we use V from SVD(Data))
+        # Prefer V/components first (we use V from SVD(Data)); fall back to Vh/U compat
         for k in ("V", "components", "components_", "eigvecs", "eigvec", "basis", "Vh", "vh", "U", "scores", "A"):
             if k in obj and isinstance(obj[k], torch.Tensor):
                 V_mat = _as_patch_by_k(obj[k])
@@ -69,18 +69,18 @@ def _load_V_matrix(pth: str, patch_dim: int, device: torch.device, dtype: torch.
                 if isinstance(v, torch.Tensor):
                     cand = _as_patch_by_k(v)
                     if cand is not None:
-                        U = cand
+                        V_mat = cand
                         break
     else:
         # Try attribute access (e.g., a simple namespace with .V)
         try:
-            maybe = getattr(obj, 'U', None)
+            maybe = getattr(obj, 'V', None)
             if isinstance(maybe, torch.Tensor):
-                U = _as_patch_by_k(maybe)
-            else:
-                maybe = getattr(obj, 'V', None)
+                V_mat = _as_patch_by_k(maybe)
+            if V_mat is None:
+                maybe = getattr(obj, 'U', None)
                 if isinstance(maybe, torch.Tensor):
-                    U = _as_patch_by_k(maybe)
+                    V_mat = _as_patch_by_k(maybe)
         except Exception:
             V_mat = None
 
@@ -120,36 +120,6 @@ def _apply_embed_pca(model: nn.Module, embed_cfg: dict):
         if proj.bias is not None:
             proj.bias.zero_()
     print(f"[embed-warmup] Initialized patch projection from PCA (V): '{pth}' -> weight {tuple(proj.weight.shape)}")
-
-    """If model uses sliding-window Linear patch embeddings, replace its projection
-    weights with PCA components (we use V from SVD(Data)). Completes with an
-    orthogonal basis if needed.
-    """
-    try:
-        emb = model.vit.embeddings.patch_embeddings
-    except Exception:
-        return
-    proj = getattr(emb, 'projection', None)
-    if not isinstance(proj, nn.Linear):
-        # Only applies to SW/Linear patch embedding
-        return
-    pth = embed_cfg.get('embed_pca_path', 'pca_patch.pt')
-    patch_dim = int(getattr(emb, 'patch_size', proj.in_features))
-    hidden = int(getattr(model.config, 'hidden_size', proj.out_features))
-    V = _load_V_matrix(pth, patch_dim, device=proj.weight.device, dtype=proj.weight.dtype) # (patch_dim, rlike)
-    if V_mat is None:
-        return
-    # Use as many columns as available, then complete to hidden size if needed
-    r = min(hidden, V.shape[1])
-    V = V[:, :r].contiguous()  # (patch_dim, r)
-    if r < hidden:
-        V = complete_with_orthogonal(V, out_dim=hidden)  # (patch_dim, hidden)
-    # Set weights so that y = x @ V[:, :hidden] gives PCA coefficients
-    with torch.no_grad():
-        proj.weight.data.copy_(V.t())  # (hidden, patch_dim)
-        if proj.bias is not None:
-            proj.bias.zero_()
-    print(f"[embed-warmup] Initialized patch projection from PCA: '{pth}' -> weight {tuple(proj.weight.shape)}")
 
 def get_model(config):
     """Build ViT or ViT with a PCA-initialized global-attention front-end."""
@@ -501,6 +471,25 @@ class GlobalAttentionLayer(nn.Module):
                             self.explained_variance_at_r = float((S[:keep_r] ** 2).sum().item() / (total_var + 1e-12))
                     except Exception:
                         pass
+        else:
+            # Keep PyTorch defaults for linear layers when no PCA is provided.
+            # Optionally, users can override initializations elsewhere.
+            pass
+
+    def q_proj(self, x):
+        if self.use_lora:
+            return self.q_up(self.q_down(x))
+        return self.q_lin(x)
+
+    def k_proj(self, x):
+        if self.use_lora:
+            return self.k_up(self.k_down(x))
+        return self.k_lin(x)
+
+    def v_proj(self, x):
+        if self.use_lora:
+            return self.v_up(self.v_down(x))
+        return self.v_lin(x)
     def forward(self, x):
         """
         Supports:
