@@ -106,17 +106,17 @@ def _apply_embed_pca(model: nn.Module, embed_cfg: dict):
     pth = embed_cfg.get('embed_pca_path', 'pca_patch.pt')
     patch_dim = int(getattr(emb, 'patch_size', proj.in_features))
     hidden = int(getattr(model.config, 'hidden_size', proj.out_features))
-    U = _load_U_matrix(pth, patch_dim, device=proj.weight.device, dtype=proj.weight.dtype)
+    U = _load_U_matrix(pth, patch_dim, device=proj.weight.device, dtype=proj.weight.dtype) # (patch_dim, rlike)
     if U is None:
         return
     # Use as many columns as available, then complete to hidden size if needed
-    r = min(hidden, U.shape[0])
-    U = U[:r].contiguous()  # (r, patch_dim)
+    r = min(hidden, U.shape[1])
+    U = U[:, :r].contiguous()  # (patch_dim, r)
     if r < hidden:
-        UT = complete_with_orthogonal(U.T, out_dim=hidden)  # (patch_dim, hidden)
+        U = complete_with_orthogonal(U, out_dim=hidden)  # (patch_dim, hidden)
     # Set weights so that y = x @ V[:, :hidden] gives PCA coefficients
     with torch.no_grad():
-        proj.weight.data.copy_(UT.t())  # (hidden, patch_dim)
+        proj.weight.data.copy_(U.t())  # (hidden, patch_dim)
         if proj.bias is not None:
             proj.bias.zero_()
     print(f"[embed-warmup] Initialized patch projection from PCA: '{pth}' -> weight {tuple(proj.weight.shape)}")

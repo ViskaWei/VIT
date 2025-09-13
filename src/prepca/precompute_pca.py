@@ -121,16 +121,18 @@ def main():
     with torch.no_grad():
         # Compute up to D components; center=True gives PCA basis in V
         try:
-            U, S, V = torch.pca_lowrank(P, q=D, center=True)
+            U, S, V = torch.pca_lowrank(P.T, q=D, center=True)
         except:
             dev = torch.device("cpu")
             P = P.to(dev)
-            U, S, V = torch.pca_lowrank(P, q=D, center=True)
+            U, S, V = torch.pca_lowrank(P.T, q=D, center=True)
 
+    # if  P.size is (Number of total patches, Patch Size/Feature Size)
+    # then we feed in P.T ( Number of features, Num of samples,) U is (Patch Size/Feature Size, D), S is (D,), V is (D, D)
     # Bring to CPU and save relevant stats
-    V = V[:, :D].contiguous().cpu()  # (D, D)
+    V = V.contiguous().cpu()  # (D, D)
     S = S[:D].contiguous().cpu()     # (D,)
-    U = U[:D].contiguous().cpu()  # (M, D)
+    U = U[:, :D].contiguous().cpu()  # (M, D)
     # Explained variance ratio from singular values (centered): proportional to S^2
     evr = (S ** 2)
     evr = evr / evr.sum() if float(evr.sum()) > 0 else evr
@@ -164,7 +166,7 @@ def main():
             k = min(10, V.shape[1])
             plt.figure()
             for i in range(k):
-                plt.plot(V[:, i].numpy() + i, label=f"PC{i+1}")
+                plt.plot(U[:, i].numpy() + 0.01* i, label=f"PC{i+1}")
             plt.title('Top PCA components (offset)')
             plt.tight_layout()
             plt.savefig(base + "_top10.png", dpi=150)
