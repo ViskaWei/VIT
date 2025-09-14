@@ -197,25 +197,63 @@ def get_model(config):
     loss_name = config.get('loss', {}).get('name', None)
     # Unified freeze knob for both Q/K (if applicable) and embedding
     freeze_epochs_unified = int(warmup_cfg.get('freeze_qk_epochs', 0) or 0)
+    # High-level summary of warmup settings
+    try:
+        print(f"[warmup] Settings: global={bool(warmup_cfg.get('global', False))}, embed={bool(warmup_cfg.get('embed', False))}, freeze_epochs={freeze_epochs_unified}")
+    except Exception:
+        pass
 
     if warmup_cfg.get('global', False):
         UV = warmup_cfg.get('UV', 'V')
         r = warmup_cfg.get('r', None)   # Pass optional rank r from config for PCA init
-        pca_path = warmup_cfg.get('global_pca_path', None)
+        # Accept both keys for convenience
+        pca_path = warmup_cfg.get('global_pca_path', None) or warmup_cfg.get('pca_path', None)
+        use_input_bias = bool(warmup_cfg.get('bias', False))
         use_lora = bool(warmup_cfg.get('lora', False))
+        try:
+            print(f"[global-warmup] Config: UV={UV}, r={r}, lora={use_lora}, bias={use_input_bias}, pca_path={pca_path}")
+        except Exception:
+            pass
         # If r == 0, explicitly skip any PCA warm logic and do not load.
         if (r is not None) and int(r) == 0:
             pca_stats = None
         elif pca_path is not None and (r is None or int(r) > 0):
             # Support either a raw tensor (U) or a dict with more stats
-            loaded = torch.load(pca_path, weights_only=True)
+            try:
+                loaded = torch.load(pca_path, weights_only=True)
+                try:
+                    tname = type(loaded).__name__
+                except Exception:
+                    tname = 'object'
+                print(f"[global-warmup] Loaded PCA from '{pca_path}' (weights_only=True) type={tname}")
+            except Exception as e:
+                loaded = torch.load(pca_path)
+                try:
+                    tname = type(loaded).__name__
+                except Exception:
+                    tname = 'object'
+                print(f"[global-warmup] Loaded PCA from '{pca_path}' (fallback weights_only=False) type={tname}; reason: {e}")
             if isinstance(loaded, dict):
                 pca_stats = loaded
+                try:
+                    keys = list(loaded.keys())
+                    has_mean = 'mean' in loaded
+                    print(f"[global-warmup] PCA keys: {keys}; has_mean={has_mean}")
+                except Exception:
+                    pass
             else:
                 pca_stats = {"V": loaded}
+                try:
+                    print(f"[global-warmup] PCA loaded as raw tensor with shape={tuple(loaded.shape)} (stored under key 'V')")
+                except Exception:
+                    pass
             # Optionally freeze Q/K for the first N epochs (train only V + downstream)
         else:
             pca_stats = None
+            try:
+                print("[global-warmup] No PCA stats loaded (either no path provided or r==0); using default init for Q/K/V")
+            except Exception:
+                pass
         # Read freeze setting, but if PCA is not used, force-disable freeze.
         qk_freeze_epochs = int(freeze_epochs_unified)
         if pca_stats is None:
@@ -229,13 +267,22 @@ def get_model(config):
             use_lora=use_lora,
             qk_freeze_epochs=qk_freeze_epochs,
             UV=UV,
+            use_input_bias=use_input_bias,
         )
+        try:
+            print(f"[global-warmup] Freeze schedule: qk_freeze_epochs={qk_freeze_epochs}")
+        except Exception:
+            pass
     else:
         model = MyViT(vit_config, loss_name=loss_name)
 
     # Optional: patch-embedding PCA init
     try:
         if bool(warmup_cfg.get('embed', False)):
+            pth = warmup_cfg.get('embed_pca_path', 'pca_patch.pt')
+            basis_key = str(warmup_cfg.get('UV', 'V'))
+            use_mean = bool(warmup_cfg.get('use_pca_mean', False))
+            print(f"[embed-warmup] Config: path='{pth}', basis={basis_key}, use_pca_mean={use_mean}")
             _apply_embed_pca(model, warmup_cfg)
     except Exception as e:
         print(f"[embed-warmup] Skipped due to error: {e}")
@@ -486,7 +533,7 @@ class MyEmbeddings(nn.Module):
                 p.requires_grad = trainable
 
 class GlobalAttentionLayer(nn.Module):
-    def __init__(self, input_dim, pca_stats, r: int | None = None, use_lora: bool = False, lora_min=64, uv_key: str | None = None):
+    def __init__(self, input_dim, pca_stats, r: int | None = None, use_lora: bool = False, lora_min=64, uv_key: str | None = None, use_pca_bias: bool = False):
         super(GlobalAttentionLayer, self).__init__()
         self.input_dim = input_dim  # e.g., 4096
         self.use_lora = bool(use_lora)
@@ -510,6 +557,8 @@ class GlobalAttentionLayer(nn.Module):
             self.v_lin = nn.Linear(input_dim, input_dim, bias=False)
         
         self.softmax = nn.Softmax(dim=-1)
+        # Optional input bias from PCA stats (e.g., mean vector of shape (D,))
+        self.input_bias = None
 
         # PCA initialization for Q/K with flexible basis selection
         if pca_stats is not None:
@@ -571,6 +620,10 @@ class GlobalAttentionLayer(nn.Module):
                         # Initialize V branch orthogonally
                         nn.init.orthogonal_(self.v_down.weight)
                         nn.init.orthogonal_(self.v_up.weight)
+                        try:
+                            print(f"[global-warmup] Basis key='{cand_key}', V_mat={tuple(V_mat.shape)}, applied_r={use_r}, mode='lora'")
+                        except Exception:
+                            pass
                     else:
                         # Full matrix: put top-r components in the leading rows
                         nn.init.orthogonal_(self.q_lin.weight)
@@ -579,6 +632,10 @@ class GlobalAttentionLayer(nn.Module):
                         self.q_lin.weight.data[:keep_r, :].copy_(V_mat.t()[:keep_r, :])
                         self.k_lin.weight.data[:keep_r, :].copy_(V_mat.t()[:keep_r, :])
                         nn.init.orthogonal_(self.v_lin.weight)
+                        try:
+                            print(f"[global-warmup] Basis key='{cand_key}', V_mat={tuple(V_mat.shape)}, applied_r={keep_r}, mode='full'")
+                        except Exception:
+                            pass
 
                     # Store explained variance up to r if available
                     self.explained_variance_at_r = None
@@ -588,12 +645,34 @@ class GlobalAttentionLayer(nn.Module):
                             use_val = (self.rank if self.use_lora else (self.r or evr.shape[0]))
                             keep_r = min(int(use_val), int(evr.shape[0]))
                             self.explained_variance_at_r = float(evr[:keep_r].sum().item())
+                            try:
+                                print(f"[global-warmup] Explained variance@r ≈ {self.explained_variance_at_r:.4f}")
+                            except Exception:
+                                pass
                         elif isinstance(pca_stats, dict) and ("S" in pca_stats):
                             S = pca_stats["S"]
                             total_var = float((S ** 2).sum().item())
                             use_val = (self.rank if self.use_lora else (self.r or S.shape[0]))
                             keep_r = min(int(use_val), int(S.shape[0]))
                             self.explained_variance_at_r = float((S[:keep_r] ** 2).sum().item() / (total_var + 1e-12))
+                            try:
+                                print(f"[global-warmup] Explained variance@r ≈ {self.explained_variance_at_r:.4f}")
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                # Load mean as input bias if requested
+                if bool(use_pca_bias) and isinstance(pca_stats, dict):
+                    try:
+                        m = pca_stats.get('mean', None)
+                        if isinstance(m, torch.Tensor):
+                            if m.dim() == 1 and int(m.numel()) == int(self.input_dim):
+                                bias_vec = m.to(device=(self.q_lin.weight.device if hasattr(self, 'q_lin') else m.device),
+                                                dtype=(self.q_lin.weight.dtype if hasattr(self, 'q_lin') else m.dtype))
+                                # Keep as buffer (non-trainable)
+                                self.register_buffer('input_bias', bias_vec, persistent=False)
+                                print(f"[global-warmup] Loaded input bias from PCA mean: shape={tuple(bias_vec.shape)}")
                     except Exception:
                         pass
         else:
@@ -622,10 +701,16 @@ class GlobalAttentionLayer(nn.Module):
         - 3D input `(B, L, D)`: apply simple global attention over `L`
         """
         if x.dim() == 2:
-            # (B, D) -> (B, D), pre-project with low-rank Q mapping
+            # (B, D) -> (B, D)
+            ib = getattr(self, 'input_bias', None)
+            if isinstance(ib, torch.Tensor):
+                x = x + ib
             return self.q_proj(x)
 
         # Expect (B, L, D) for attention
+        ib = getattr(self, 'input_bias', None)
+        if isinstance(ib, torch.Tensor):
+            x = x + ib
         q = self.q_proj(x)
         k = self.k_proj(x)
         v = self.v_proj(x)
@@ -654,11 +739,18 @@ class GlobalAttnViT(MyViT):
     delegating to the parent `MyViT` forward.
     """
 
-    def __init__(self, config, pca_stats=None, loss_name=None, model_name="GAtt_ViT", r: int | None = None, use_lora: bool = False, qk_freeze_epochs: int = 0, UV=""):
+    def __init__(self, config, pca_stats=None, loss_name=None, model_name="GAtt_ViT", r: int | None = None, use_lora: bool = False, qk_freeze_epochs: int = 0, UV="", use_input_bias: bool = False):
         tag = (f"Lo{r}" if use_lora else f"Fc{r}") if pca_stats is not None else ("LoRD" if use_lora else "FcRD")
         model_name = f"G{UV}V{tag}_fz{qk_freeze_epochs}_{model_name}"
         super().__init__(config, loss_name=loss_name, model_name=model_name)
-        self.attn = GlobalAttentionLayer(input_dim=config.image_size, pca_stats=pca_stats, r=r, use_lora=use_lora, uv_key=UV if isinstance(UV, str) and len(UV) > 0 else None)
+        self.attn = GlobalAttentionLayer(
+            input_dim=config.image_size,
+            pca_stats=pca_stats,
+            r=r,
+            use_lora=use_lora,
+            uv_key=UV if isinstance(UV, str) and len(UV) > 0 else None,
+            use_pca_bias=bool(use_input_bias),
+        )
         # Freeze Q/K for the first N epochs if requested
         self.qk_freeze_epochs = int(qk_freeze_epochs or 0)
         self._qk_frozen_state = None  # track last applied state
