@@ -21,16 +21,33 @@ def train_fn(args=None):
     )
     config = load_config(cfg_path)
 
-    # Ensure warmup section exists
+    # Helper: deep-set using dotted keys, e.g., 'warmup.r', 'model.proj_fn'
+    def _deep_set(d: dict, dotted: str, value):
+        keys = dotted.split('.')
+        cur = d
+        for k in keys[:-1]:
+            if k not in cur or not isinstance(cur[k], dict):
+                cur[k] = {}
+            cur = cur[k]
+        cur[keys[-1]] = value
+
+    # Apply arbitrary overrides from sweep config to our nested config
+    # Skip reserved keys used only for locating the base config
+    for k, v in dict(wandb.config).items():
+        if k in ("vit_config",):
+            continue
+        try:
+            _deep_set(config, k, v)
+        except Exception:
+            # Last-resort: set at top-level if dotted path fails
+            try:
+                config[k] = v
+            except Exception:
+                pass
+
+    # Ensure warmup exists for later access
     if 'warmup' not in config:
         config['warmup'] = {}
-
-    # Pick r from sweep param or fallback to base config or 32
-    r_arg = getattr(args, 'r', None) if args is not None else None
-    r_cfg = wandb.config.get('r', None)
-    if r_cfg is None:
-        r_cfg = r_arg if r_arg is not None else config.get('warmup', {}).get('r', 32)
-    config['warmup']['r'] = int(r_cfg)
 
     # Keep dataloader workers modest under multi-agent sweeps
     train = config.setdefault('train', {})

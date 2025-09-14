@@ -3,6 +3,13 @@ set -euo pipefail
 
 # Simple helper to create a W&B sweep and launch multi-GPU agents.
 
+# Load .env if present so WANDB_* and others are available
+if [ -f ./.env ]; then
+  set -a
+  . ./.env
+  set +a
+fi
+
 # Defaults (can be overridden by flags or env)
 ENTITY_DEFAULT="${WANDB_ENTITY:-}"
 PROJECT_DEFAULT="${WANDB_PROJECT:-vit-test}"
@@ -81,4 +88,3 @@ done
 echo "All agents started. Waiting... (Ctrl-C to stop)"
 trap 'echo "Stopping agents..."; kill ${PIDS[@]} 2>/dev/null || true; exit 0' INT TERM
 wait
-

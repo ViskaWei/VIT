@@ -24,12 +24,10 @@ def complete_with_orthogonal(U: torch.Tensor, out_dim: int) -> torch.Tensor:
 def _load_V_matrix(pth: str, patch_dim: int, device: torch.device, dtype: torch.dtype, basis_key: str | None = None) -> torch.Tensor | None:
     """Load a PCA matrix for patch embedding init and return a (patch_dim, k) tensor.
 
-    If `basis_key` is provided (e.g., 'V' or 'U'), this function will try to
-    fetch exactly that key from the loaded object and adapt shape by transposing
-    if needed so the returned matrix has shape (patch_dim, k).
-
-    If `basis_key` is None and the loaded object is a dict, we fall back to a
-    best-effort scan of common names for backward compatibility.
+    Accepts flexible keys for bases, including 'V', 'Vt', 'Vh', 'vh', 'U', 'Ut', and
+    common sklearn aliases like 'components'/'components_'. If `basis_key` is provided,
+    we try a small set of synonyms rather than requiring an exact match. Shapes are
+    adapted (transposed) so the return is always (patch_dim, k).
     """
     try:
         obj = torch.load(pth, weights_only=True, map_location="cpu")
@@ -53,16 +51,26 @@ def _load_V_matrix(pth: str, patch_dim: int, device: torch.device, dtype: torch.
     if isinstance(obj, torch.Tensor):
         V_mat = _as_patch_by_k(obj)
     elif isinstance(obj, dict):
-        # Direct key if specified
+        # Try requested key (with synonyms) when specified
         if isinstance(basis_key, str) and len(basis_key) > 0:
-            if basis_key in obj and isinstance(obj[basis_key], torch.Tensor):
-                V_mat = _as_patch_by_k(obj[basis_key])
-                if V_mat is None:
-                    print(f"[embed-warmup] Key '{basis_key}' found in '{pth}' but shape incompatible with patch_dim={patch_dim}")
-                    return None
+            key = basis_key.strip()
+            # Map 'Vt' to typical variants users save (Vt/Vh/vh), and 'Ut' to 'U'
+            if key.lower() in ('vt',):
+                candidates = ['Vt', 'Vh', 'vh', 'V', 'components', 'components_']
+            elif key.lower() in ('v',):
+                candidates = ['V', 'components', 'components_', 'Vt', 'Vh', 'vh']
+            elif key.lower() in ('ut',):
+                candidates = ['Ut', 'U']
+            elif key.lower() in ('u',):
+                candidates = ['U', 'Ut']
             else:
-                print(f"[embed-warmup] Key '{basis_key}' not found in '{pth}'")
-                return None
+                candidates = [key]
+            for cand_key in candidates:
+                if cand_key in obj and isinstance(obj[cand_key], torch.Tensor):
+                    V_mat = _as_patch_by_k(obj[cand_key])
+                    if V_mat is not None:
+                        break
+            # If still None, fall through to generic scan
         # Fallback scan for backward compatibility
         if V_mat is None:
             for k in ("V", "components", "components_", "eigvecs", "eigvec", "basis", "Vh", "vh", "U", "scores", "A"):
@@ -503,20 +511,32 @@ class GlobalAttentionLayer(nn.Module):
         
         self.softmax = nn.Softmax(dim=-1)
 
-        # PCA initialization for Q/K with V (feature-space basis)
+        # PCA initialization for Q/K with flexible basis selection
         if pca_stats is not None:
             # Accept common keys: V, components, components_, Vh/vh (transpose), U (compat when computed on P^T)
             if isinstance(pca_stats, dict):
                 cand = None
                 cand_key = None
-                # Prefer explicit key if provided
+                # Prefer explicit key if provided, but allow synonyms like 'Vt'/'Ut'
                 if isinstance(uv_key, str) and len(uv_key) > 0:
-                    if uv_key in pca_stats and isinstance(pca_stats[uv_key], torch.Tensor):
-                        cand = pca_stats[uv_key]
-                        cand_key = uv_key
+                    key = uv_key.strip()
+                    if key.lower() in ('vt',):
+                        pref = ['Vt', 'Vh', 'vh', 'V', 'components', 'components_']
+                    elif key.lower() in ('v',):
+                        pref = ['V', 'components', 'components_', 'Vt', 'Vh', 'vh']
+                    elif key.lower() in ('ut',):
+                        pref = ['Ut', 'U']
+                    elif key.lower() in ('u',):
+                        pref = ['U', 'Ut']
                     else:
-                        raise ValueError(f"Requested PCA key '{uv_key}' not found in provided stats")
-                else:
+                        pref = [key]
+                    for k in pref:
+                        if k in pca_stats and isinstance(pca_stats[k], torch.Tensor):
+                            cand = pca_stats[k]
+                            cand_key = k
+                            break
+                # If none chosen, fallback scan
+                if cand is None:
                     for k in ("V", "components", "components_", "eigvecs", "eigvec", "basis", "Vh", "vh", "U"):
                         if k in pca_stats and isinstance(pca_stats[k], torch.Tensor):
                             cand = pca_stats[k]
