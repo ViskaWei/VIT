@@ -230,6 +230,14 @@ class ViTLModule(BaseLightningModule):
         except Exception:
             pass
 
+        # Apply initial embed freeze state at epoch 0 if configured
+        try:
+            if hasattr(self.model, 'apply_embed_freeze'):
+                frozen = bool(self.model.apply_embed_freeze(current_epoch=0))
+                self.log('embed_frozen', int(frozen), on_step=False, on_epoch=True)
+        except Exception:
+            pass
+
     def on_train_epoch_start(self):
         # Keep BaseLightningModule behavior (LR logging)
         super().on_train_epoch_start()
@@ -239,6 +247,13 @@ class ViTLModule(BaseLightningModule):
                 frozen = bool(self.model.apply_qk_freeze(current_epoch=self.current_epoch))
                 # Log an indicator for monitoring
                 self.log('qk_frozen', int(frozen), on_step=False, on_epoch=True, prog_bar=False)
+        except Exception:
+            pass
+        # Enforce embed freeze schedule if available on the model
+        try:
+            if hasattr(self.model, 'apply_embed_freeze'):
+                frozen = bool(self.model.apply_embed_freeze(current_epoch=self.current_epoch))
+                self.log('embed_frozen', int(frozen), on_step=False, on_epoch=True, prog_bar=False)
         except Exception:
             pass
     

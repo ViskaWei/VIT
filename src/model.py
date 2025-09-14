@@ -21,19 +21,15 @@ def complete_with_orthogonal(U: torch.Tensor, out_dim: int) -> torch.Tensor:
     Q, _ = torch.linalg.qr(A)  # (in_dim, out_dim)
     return Q[:, :out_dim]
 
-def _load_V_matrix(pth: str, patch_dim: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor | None:
+def _load_V_matrix(pth: str, patch_dim: int, device: torch.device, dtype: torch.dtype, basis_key: str | None = None) -> torch.Tensor | None:
     """Load a PCA matrix for patch embedding init and return a (patch_dim, k) tensor.
 
-    Note: We intend to use the principal axes `V` (feature-space basis) from `U, S, Vt = svd(Data)`
-    as the replacement for the embedding projection (columns of `V`). Therefore
-    we first try to read keys like 'V' or 'components'. We still accept 'U'/'Vh'
-    for backward-compatibility, transposing if needed so the returned matrix has
-    shape (patch_dim, k).
+    If `basis_key` is provided (e.g., 'V' or 'U'), this function will try to
+    fetch exactly that key from the loaded object and adapt shape by transposing
+    if needed so the returned matrix has shape (patch_dim, k).
 
-    Accepts either:
-    - a raw 2D tensor
-    - a dict containing a suitable tensor
-    Falls back to scanning dict values for a tensor whose first/last dim equals `patch_dim`.
+    If `basis_key` is None and the loaded object is a dict, we fall back to a
+    best-effort scan of common names for backward compatibility.
     """
     try:
         obj = torch.load(pth, weights_only=True, map_location="cpu")
@@ -57,12 +53,23 @@ def _load_V_matrix(pth: str, patch_dim: int, device: torch.device, dtype: torch.
     if isinstance(obj, torch.Tensor):
         V_mat = _as_patch_by_k(obj)
     elif isinstance(obj, dict):
-        # Prefer V/components first (we use V from SVD(Data)); fall back to Vh/U compat
-        for k in ("V", "components", "components_", "eigvecs", "eigvec", "basis", "Vh", "vh", "U", "scores", "A"):
-            if k in obj and isinstance(obj[k], torch.Tensor):
-                V_mat = _as_patch_by_k(obj[k])
-                if V_mat is not None:
-                    break
+        # Direct key if specified
+        if isinstance(basis_key, str) and len(basis_key) > 0:
+            if basis_key in obj and isinstance(obj[basis_key], torch.Tensor):
+                V_mat = _as_patch_by_k(obj[basis_key])
+                if V_mat is None:
+                    print(f"[embed-warmup] Key '{basis_key}' found in '{pth}' but shape incompatible with patch_dim={patch_dim}")
+                    return None
+            else:
+                print(f"[embed-warmup] Key '{basis_key}' not found in '{pth}'")
+                return None
+        # Fallback scan for backward compatibility
+        if V_mat is None:
+            for k in ("V", "components", "components_", "eigvecs", "eigvec", "basis", "Vh", "vh", "U", "scores", "A"):
+                if k in obj and isinstance(obj[k], torch.Tensor):
+                    V_mat = _as_patch_by_k(obj[k])
+                    if V_mat is not None:
+                        break
         # Otherwise scan all tensor values
         if V_mat is None:
             for v in obj.values():
@@ -72,15 +79,19 @@ def _load_V_matrix(pth: str, patch_dim: int, device: torch.device, dtype: torch.
                         V_mat = cand
                         break
     else:
-        # Try attribute access (e.g., a simple namespace with .V)
+        # Try attribute access (e.g., a simple namespace)
         try:
-            maybe = getattr(obj, 'V', None)
-            if isinstance(maybe, torch.Tensor):
-                V_mat = _as_patch_by_k(maybe)
-            if V_mat is None:
-                maybe = getattr(obj, 'U', None)
+            if isinstance(basis_key, str) and len(basis_key) > 0:
+                maybe = getattr(obj, basis_key, None)
                 if isinstance(maybe, torch.Tensor):
                     V_mat = _as_patch_by_k(maybe)
+            if V_mat is None:
+                for k in ("V", "U"):
+                    maybe = getattr(obj, k, None)
+                    if isinstance(maybe, torch.Tensor):
+                        V_mat = _as_patch_by_k(maybe)
+                        if V_mat is not None:
+                            break
         except Exception:
             V_mat = None
 
@@ -91,43 +102,96 @@ def _load_V_matrix(pth: str, patch_dim: int, device: torch.device, dtype: torch.
     return V_mat.to(device=device, dtype=dtype, copy=False)
 
 def _apply_embed_pca(model: nn.Module, embed_cfg: dict):
-    """If model uses sliding-window Linear patch embeddings, replace its projection
-    weights with PCA components (we use V from SVD(Data)). Completes with an
-    orthogonal basis if needed.
+    """Initialize patch-embedding projection from PCA (V).
+
+    Supports:
+    - Linear (SW) patch embeddings: `nn.Linear(patch_size -> hidden)`
+    - Conv1d (C1D/CNN) patch embeddings: `nn.Conv1d(1 -> hidden, kernel_size=patch_size, stride=...)`
+
+    In both cases, we set the rows/filters to the top principal directions V[:, :hidden].T.
+    If fewer PCs than hidden, we complete with an orthogonal basis. Bias is zero by default;
+    optionally, if `embed_cfg['use_pca_mean']` is truthy and the PCA file contains `mean` (D,),
+    we absorb centering via bias = -mean @ V[:, :hidden].
     """
     try:
         emb = model.vit.embeddings.patch_embeddings
     except Exception:
         return
     proj = getattr(emb, 'projection', None)
-    if not isinstance(proj, nn.Linear):
-        # Only applies to SW/Linear patch embedding
+    if not isinstance(proj, (nn.Linear, nn.Conv1d)):
+        # Only applies to SW/Linear or C1D/Conv1d patch embedding
         return
     pth = embed_cfg.get('embed_pca_path', 'pca_patch.pt')
     patch_dim = int(getattr(emb, 'patch_size', proj.in_features))
-    hidden = int(getattr(model.config, 'hidden_size', proj.out_features))
-    V = _load_V_matrix(pth, patch_dim, device=proj.weight.device, dtype=proj.weight.dtype)  # (patch_dim, r_like)
+    # Determine hidden/out_channels
+    hidden = int(getattr(model.config, 'hidden_size', getattr(proj, 'out_features', getattr(proj, 'out_channels', 0))))
+
+    # Load feature basis V (D, k)
+    basis_key = str(embed_cfg.get('UV', 'V')) if embed_cfg is not None else 'V'
+    V = _load_V_matrix(pth, patch_dim, device=proj.weight.device, dtype=proj.weight.dtype, basis_key=basis_key)
     if V is None:
         return
     # Use as many columns as available, then complete to hidden size if needed
     r = min(hidden, V.shape[1])
-    V = V[:, :r].contiguous()  # (patch_dim, r)
+    V = V[:, :r].contiguous()  # (D, r)
     if r < hidden:
-        V = complete_with_orthogonal(V, out_dim=hidden)  # (patch_dim, hidden)
-    # Set weights so that y = x @ V[:, :hidden] gives PCA coefficients (if x is centered)
+        V = complete_with_orthogonal(V, out_dim=hidden)  # (D, hidden)
+
+    # Optional centering via bias if mean vector is available and requested
+    use_mean = bool(embed_cfg.get('use_pca_mean', False))
+    mean_vec = None
+    if use_mean:
+        try:
+            stats = torch.load(pth, map_location='cpu')
+            if isinstance(stats, dict) and isinstance(stats.get('mean', None), torch.Tensor):
+                m = stats['mean']
+                if m.dim() == 1 and int(m.numel()) == patch_dim:
+                    mean_vec = m.to(device=V.device, dtype=V.dtype)
+        except Exception:
+            mean_vec = None
+
+    # Apply to Linear or Conv1d
     with torch.no_grad():
-        proj.weight.data.copy_(V.t())  # (hidden, patch_dim)
-        if proj.bias is not None:
-            proj.bias.zero_()
-    print(f"[embed-warmup] Initialized patch projection from PCA (V): '{pth}' -> weight {tuple(proj.weight.shape)}")
+        if isinstance(proj, nn.Linear):
+            # weight: (hidden, D)
+            proj.weight.data.copy_(V.t())
+            if proj.bias is not None:
+                if mean_vec is not None:
+                    proj.bias.data.copy_((-mean_vec @ V).to(proj.bias.dtype))  # (hidden,)
+                else:
+                    proj.bias.zero_()
+            print(f"[embed-warmup] Linear proj init from PCA ({basis_key}): '{pth}' -> weight {tuple(proj.weight.shape)}")
+        else:  # nn.Conv1d
+            # Expect (out_channels=hidden, in_channels=1, kernel_size=D)
+            oc, ic, ksz = proj.weight.shape
+            if ic != 1:
+                # Only in_channels=1 supported by our PCA mapping
+                print(f"[embed-warmup] Skip Conv1d PCA init: in_channels={ic} unsupported (expect 1)")
+                return
+            if ksz != patch_dim:
+                print(f"[embed-warmup] Warning: Conv1d kernel_size={ksz} != patch_dim={patch_dim}; proceeding with min size copy")
+            use_k = min(ksz, patch_dim)
+            # Zero then copy the first use_k elements of each filter row
+            proj.weight.data.zero_()
+            proj.weight.data[:hidden, 0, :use_k].copy_(V.t()[:hidden, :use_k])
+            if proj.bias is not None:
+                if mean_vec is not None:
+                    # bias_j = -mean @ v_j
+                    proj.bias.data.copy_((-mean_vec @ V).to(proj.bias.dtype))
+                else:
+                    proj.bias.zero_()
+            print(f"[embed-warmup] Conv1d proj init from PCA ({basis_key}): '{pth}' -> weight {tuple(proj.weight.shape)}")
 
 def get_model(config):
     """Build ViT or ViT with a PCA-initialized global-attention front-end."""
     warmup_cfg = get_pca_config(config)
     vit_config = get_vit_config(config)
     loss_name = config.get('loss', {}).get('name', None)
+    # Unified freeze knob for both Q/K (if applicable) and embedding
+    freeze_epochs_unified = int(warmup_cfg.get('freeze_qk_epochs', 0) or 0)
 
     if warmup_cfg.get('global', False):
+        UV = warmup_cfg.get('UV', 'V')
         r = warmup_cfg.get('r', None)   # Pass optional rank r from config for PCA init
         pca_path = warmup_cfg.get('global_pca_path', None)
         use_lora = bool(warmup_cfg.get('lora', False))
@@ -145,7 +209,7 @@ def get_model(config):
         else:
             pca_stats = None
         # Read freeze setting, but if PCA is not used, force-disable freeze.
-        qk_freeze_epochs = int(warmup_cfg.get('freeze_qk_epochs', 0) or 0)
+        qk_freeze_epochs = int(freeze_epochs_unified)
         if pca_stats is None:
             qk_freeze_epochs = 0
         
@@ -156,6 +220,7 @@ def get_model(config):
             r=r,
             use_lora=use_lora,
             qk_freeze_epochs=qk_freeze_epochs,
+            UV=UV,
         )
     else:
         model = MyViT(vit_config, loss_name=loss_name)
@@ -166,6 +231,13 @@ def get_model(config):
             _apply_embed_pca(model, warmup_cfg)
     except Exception as e:
         print(f"[embed-warmup] Skipped due to error: {e}")
+
+    # Freeze patch embedding for first N epochs using the same knob
+    try:
+        if hasattr(model, 'embed_freeze_epochs'):
+            model.embed_freeze_epochs = int(freeze_epochs_unified)
+    except Exception:
+        pass
 
     return model
 
@@ -238,6 +310,9 @@ class MyViT(ViTPreTrainedModel, BaseModel):
         self.config = config
         self.vit = ViTModel(config)
         self.vit.embeddings = MyEmbeddings(config)
+        # Embedding freeze schedule (can be set by get_model from config)
+        self.embed_freeze_epochs: int = 0
+        self._embed_frozen_state: bool | None = None
         self.task_type = config.task_type
         if self.task_type == 'cls':  # classification
             self.classifier = nn.Linear(config.hidden_size, config.num_labels)
@@ -310,6 +385,22 @@ class MyViT(ViTPreTrainedModel, BaseModel):
         elif hasattr(outputs, 'loss'):
             log_fn({f'{self.loss_name}_loss': outputs.loss})
 
+    # --- Utilities for freezing/unfreezing patch embedding during training ---
+    def apply_embed_freeze(self, current_epoch: int) -> bool:
+        """Freeze the patch projection for the first `embed_freeze_epochs` epochs.
+        Returns True if embedding is frozen for this epoch, else False.
+        """
+        if int(self.embed_freeze_epochs or 0) <= 0:
+            return False
+        should_freeze = (current_epoch < int(self.embed_freeze_epochs))
+        if should_freeze != self._embed_frozen_state:
+            try:
+                self.vit.embeddings.set_patch_proj_trainable(not should_freeze)
+            except Exception:
+                pass
+            self._embed_frozen_state = should_freeze
+        return should_freeze
+
 
 class MyWindowPatchEmbeddings(nn.Module):
     def __init__(self, config):
@@ -361,7 +452,7 @@ class MyEmbeddings(nn.Module):
         self.config = config
         if self.config.proj_fn == 'SW':
             self.patch_embeddings = MyWindowPatchEmbeddings(config)
-        elif self.config.proj_fn == 'C1D':
+        elif self.config.proj_fn in ('C1D', 'CNN'):
             self.patch_embeddings = MyCNN1DPatchEmbeddings(config)
 
         self.num_patches = self.patch_embeddings.num_patches
@@ -380,8 +471,14 @@ class MyEmbeddings(nn.Module):
         x = self.dropout(x)
         return x
 
+    def set_patch_proj_trainable(self, trainable: bool = True):
+        """Enable/disable gradients for the patch projection layer only."""
+        if hasattr(self, 'patch_embeddings') and hasattr(self.patch_embeddings, 'projection'):
+            for p in self.patch_embeddings.projection.parameters():
+                p.requires_grad = trainable
+
 class GlobalAttentionLayer(nn.Module):
-    def __init__(self, input_dim, pca_stats, r: int | None = None, use_lora: bool = False, lora_min=64):
+    def __init__(self, input_dim, pca_stats, r: int | None = None, use_lora: bool = False, lora_min=64, uv_key: str | None = None):
         super(GlobalAttentionLayer, self).__init__()
         self.input_dim = input_dim  # e.g., 4096
         self.use_lora = bool(use_lora)
@@ -412,11 +509,19 @@ class GlobalAttentionLayer(nn.Module):
             if isinstance(pca_stats, dict):
                 cand = None
                 cand_key = None
-                for k in ("V", "components", "components_", "eigvecs", "eigvec", "basis", "Vh", "vh", "U"):
-                    if k in pca_stats and isinstance(pca_stats[k], torch.Tensor):
-                        cand = pca_stats[k]
-                        cand_key = k
-                        break
+                # Prefer explicit key if provided
+                if isinstance(uv_key, str) and len(uv_key) > 0:
+                    if uv_key in pca_stats and isinstance(pca_stats[uv_key], torch.Tensor):
+                        cand = pca_stats[uv_key]
+                        cand_key = uv_key
+                    else:
+                        raise ValueError(f"Requested PCA key '{uv_key}' not found in provided stats")
+                else:
+                    for k in ("V", "components", "components_", "eigvecs", "eigvec", "basis", "Vh", "vh", "U"):
+                        if k in pca_stats and isinstance(pca_stats[k], torch.Tensor):
+                            cand = pca_stats[k]
+                            cand_key = k
+                            break
                 if cand is not None:
                     V = cand
                     if V.dim() != 2:
@@ -529,11 +634,11 @@ class GlobalAttnViT(MyViT):
     delegating to the parent `MyViT` forward.
     """
 
-    def __init__(self, config, pca_stats=None, loss_name=None, model_name="GAtt_ViT", r: int | None = None, use_lora: bool = False, qk_freeze_epochs: int = 0):
+    def __init__(self, config, pca_stats=None, loss_name=None, model_name="GAtt_ViT", r: int | None = None, use_lora: bool = False, qk_freeze_epochs: int = 0, UV=""):
         tag = (f"Lo{r}" if use_lora else f"Fc{r}") if pca_stats is not None else ("LoRD" if use_lora else "FcRD")
-        model_name = f"GV{tag}_fz{qk_freeze_epochs}_{model_name}"
+        model_name = f"G{UV}V{tag}_fz{qk_freeze_epochs}_{model_name}"
         super().__init__(config, loss_name=loss_name, model_name=model_name)
-        self.attn = GlobalAttentionLayer(input_dim=config.image_size, pca_stats=pca_stats, r=r, use_lora=use_lora)
+        self.attn = GlobalAttentionLayer(input_dim=config.image_size, pca_stats=pca_stats, r=r, use_lora=use_lora, uv_key=UV if isinstance(UV, str) and len(UV) > 0 else None)
         # Freeze Q/K for the first N epochs if requested
         self.qk_freeze_epochs = int(qk_freeze_epochs or 0)
         self._qk_frozen_state = None  # track last applied state

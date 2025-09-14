@@ -104,6 +104,8 @@ CONFIG_DIR_DEFAULT="${CONFIG_DIR:-$ROOT/configs/anyon}"
 if [ "$MODE" = "test" ]; then
   CONFIG_FILE="$CONFIG_DIR_DEFAULT/test.yaml"
   PY="./scripts/test.py"
+  WANDB=0
+  DEBUG=1
 else
   CONFIG_FILE="$CONFIG_DIR_DEFAULT/run.yaml"
   PY="./scripts/run.py"
