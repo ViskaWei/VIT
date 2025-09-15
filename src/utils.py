@@ -226,16 +226,17 @@ def masked_var_fraction(noise, mask):
 
 
 def load_config(config_path):
-    """Load YAML and expand env vars/home in all string values.
+    """Load YAML config with support for W&B-exported formats.
 
-    Supports values like "$VAR", "${VAR}", and "~".
+    - Expands env vars and user home (~) in all string values.
+    - Transparently flattens W&B "config" YAMLs that wrap values under
+      top-level keys with "value", or under "config: { value: ... }".
     """
     with open(config_path, 'r') as file:
-        data = yaml.safe_load(file)
+        raw = yaml.safe_load(file)
 
     def _expand(item):
         if isinstance(item, str):
-            # Expand env variables and user home
             return os.path.expanduser(os.path.expandvars(item))
         if isinstance(item, dict):
             return {k: _expand(v) for k, v in item.items()}
@@ -243,6 +244,35 @@ def load_config(config_path):
             return [_expand(v) for v in item]
         return item
 
+    def _maybe_flatten_wandb_cfg(cfg):
+        """Detect and flatten W&B-exported configs.
+
+        Supported patterns:
+        1) { 'config': { 'value': { ... real config ... } }, '_wandb': {...}, ... }
+        2) { 'model': { 'value': {...} }, 'train': { 'value': {...} }, ... }
+        In both cases, this returns the inner "real" config dict.
+        """
+        if not isinstance(cfg, dict):
+            return cfg
+        # Pattern 1: nested under 'config.value'
+        inner = cfg.get('config')
+        if isinstance(inner, dict) and isinstance(inner.get('value'), dict):
+            return inner['value']
+        # Pattern 2: top-level keys each have a 'value'
+        # Keep only meaningful keys and drop W&B metadata like '_wandb'
+        flattened = {}
+        saw_value_container = False
+        for k, v in cfg.items():
+            if isinstance(v, dict) and 'value' in v and isinstance(v['value'], (dict, list, str, int, float, bool, type(None))):
+                flattened[k] = v['value']
+                saw_value_container = True
+            elif k != '_wandb':  # drop W&B metadata section by default
+                flattened[k] = v
+        if saw_value_container:
+            return flattened
+        return cfg
+
+    data = _maybe_flatten_wandb_cfg(raw)
     return _expand(data)
 
 

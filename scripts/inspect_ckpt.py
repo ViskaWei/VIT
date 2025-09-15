@@ -140,11 +140,60 @@ def save_activations(acts: OrderedDict, out_dir: str, batch_idx: int, model_out=
     # Single consolidated file per batch
     torch.save(payload, os.path.join(bdir, "all.pt"))
 
+def _resolve_ckpt(args, config):
+    """Return a local checkpoint path.
+
+    Priority:
+    1) args.ckpt if provided
+    2) If args.wandb_id provided, prefer already-downloaded local artifact ./artifacts/model-<id>:<version>/model.ckpt
+       Otherwise, download from W&B using args.wandb_id (and entity/project/version)
+    """
+    if args.ckpt:
+        if not os.path.isfile(args.ckpt):
+            raise FileNotFoundError(f"Specified ckpt not found: {args.ckpt}")
+        return args.ckpt
+
+    if args.wandb_id:
+        # First try local artifact cache path to avoid re-downloading
+        version = args.version or 'v1'
+        local_art_dir = os.path.join('artifacts', f"model-{args.wandb_id}:{version}")
+        local_ckpt = os.path.join(local_art_dir, 'model.ckpt')
+        if os.path.isfile(local_ckpt):
+            print(f"Found local W&B artifact checkpoint: {local_ckpt}")
+            return local_ckpt
+
+        try:
+            import wandb
+        except Exception as e:
+            raise RuntimeError("wandb is required to download artifacts. Please `pip install wandb`. ") from e
+
+        entity = args.entity or os.environ.get('WANDB_ENTITY') or 'viskawei-johns-hopkins-university'
+        project = args.project or (config.get('project') if isinstance(config, dict) else None) or 'vit-test'
+        artifact_type = args.artifact_type or 'model'
+
+        run = wandb.init(entity=entity, project=project, job_type='download')
+        path = f"{entity}/{project}/model-{args.wandb_id}:{version}"
+        art = run.use_artifact(path, type=artifact_type)
+        a_dir = art.download()
+        ckpt = os.path.join(a_dir, 'model.ckpt')
+        if not os.path.isfile(ckpt):
+            raise FileNotFoundError(f"Downloaded artifact missing model.ckpt at: {ckpt}")
+        print(f"Downloaded checkpoint from W&B: {ckpt}")
+        return ckpt
+
+    raise ValueError("Must provide either --ckpt or --wandb-id to locate a checkpoint.")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Load from ckpt, dump params and activations")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
-    parser.add_argument("--ckpt", type=str, required=True, help="Path to Lightning .ckpt file")
+    parser.add_argument("--ckpt", type=str, default=None, help="Path to Lightning .ckpt file")
+    # If --ckpt is omitted, allow fetching from W&B
+    parser.add_argument("--wandb-id", type=str, default=None, help="W&B run short ID used in artifact name (e.g., umaovsqj)")
+    parser.add_argument("--entity", type=str, default=None, help="W&B entity (defaults to env WANDB_ENTITY or project config)")
+    parser.add_argument("--project", type=str, default=None, help="W&B project (defaults to config['project'] or 'vit-test')")
+    parser.add_argument("--version", type=str, default='v1', help="Artifact version or alias (default: v1)")
+    parser.add_argument("--artifact-type", type=str, default='model', help="Artifact type (default: model)")
     parser.add_argument("--out", type=str, default=None, help="Output dir (default results/inspect/<ckpt_basename>")
     parser.add_argument("--max-batches", type=int, default=1, help="Number of test batches to capture")
     parser.add_argument("--save-full-param-tensors", action="store_true", help="Also save full parameter tensors to disk (can be large)")
@@ -153,9 +202,11 @@ def main():
     device = _device()
 
     config = load_config(args.config)
+    # Resolve checkpoint path (local or W&B)
+    ckpt_path = _resolve_ckpt(args, config)
 
     # Load Lightning module from checkpoint (rebuilds model from config)
-    lm: ViTLModule = ViTLModule.load_from_checkpoint(args.ckpt, config=config)
+    lm: ViTLModule = ViTLModule.load_from_checkpoint(ckpt_path, config=config)
     lm.eval()
     lm.to(device)
 
@@ -165,7 +216,7 @@ def main():
     test_loader = dm.test_dataloader()
 
     # Output directory
-    ckpt_base = os.path.splitext(os.path.basename(args.ckpt))[0]
+    ckpt_base = os.path.splitext(os.path.basename(ckpt_path))[0]
     out_dir = args.out or os.path.join("results", "inspect", f"{ckpt_base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -182,6 +233,9 @@ def main():
                 torch.save(p.detach().to("cpu"), path)
             except Exception:
                 pass
+
+    # Patch-embedding params will be saved along with all others
+    # when --save-full-param-tensors is provided via named_parameters().
 
     # Register hooks on the underlying model to capture activations
     acts, handles = register_activation_hooks(lm.model)
