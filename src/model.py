@@ -276,7 +276,7 @@ def get_model(config):
     else:
         model = MyViT(vit_config, loss_name=loss_name)
 
-    # Optional: patch-embedding PCA init
+    # Optional: patch-embedding PCA init (and tag model name)
     try:
         if bool(warmup_cfg.get('embed', False)):
             pth = warmup_cfg.get('embed_pca_path', 'pca_patch.pt')
@@ -284,6 +284,11 @@ def get_model(config):
             use_mean = bool(warmup_cfg.get('use_pca_mean', False))
             print(f"[embed-warmup] Config: path='{pth}', basis={basis_key}, use_pca_mean={use_mean}")
             _apply_embed_pca(model, warmup_cfg)
+            # Prefix model name with e{UV} when embed warmup is enabled
+            try:
+                model._model_name = f"e{basis_key}{model._model_name}"
+            except Exception:
+                pass
     except Exception as e:
         print(f"[embed-warmup] Skipped due to error: {e}")
 
@@ -291,6 +296,24 @@ def get_model(config):
     try:
         if hasattr(model, 'embed_freeze_epochs'):
             model.embed_freeze_epochs = int(freeze_epochs_unified)
+    except Exception:
+        pass
+
+    # If any freeze epochs are configured, append or normalize _fz{epochs} in name
+    try:
+        fz_qk = int(getattr(model, 'qk_freeze_epochs', 0) or 0)
+        fz_emb = int(getattr(model, 'embed_freeze_epochs', 0) or 0)
+        fz_cfg = int(freeze_epochs_unified or 0)
+        fz_val = max(fz_qk, fz_emb, fz_cfg)
+        if isinstance(getattr(model, '_model_name', None), str):
+            name = model._model_name
+            if '_fz' in name:
+                # If name contains _fz0_ but actual freeze > 0, fix it
+                if fz_val > 0 and '_fz0_' in name:
+                    model._model_name = name.replace('_fz0_', f'_fz{fz_val}_')
+            else:
+                if fz_val > 0:
+                    model._model_name = f"{name}_fz{fz_val}"
     except Exception:
         pass
 
@@ -754,6 +777,10 @@ class GlobalAttnViT(MyViT):
         # Freeze Q/K for the first N epochs if requested
         self.qk_freeze_epochs = int(qk_freeze_epochs or 0)
         self._qk_frozen_state = None  # track last applied state
+        try:
+            print(f"[global-warmup] GlobalAttnViT initialized: name='{self._model_name}', UV={UV}, r={r}, lora={use_lora}, bias={use_input_bias}, qk_freeze_epochs={self.qk_freeze_epochs}")
+        except Exception:
+            pass
 
     def apply_qk_freeze(self, current_epoch: int) -> bool:
         """Freeze Q/K for the first `qk_freeze_epochs` epochs.
