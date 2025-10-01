@@ -180,3 +180,5 @@ else/
 data
 *.env
 *.vscode
+
+*.codex-env
