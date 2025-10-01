@@ -54,13 +54,13 @@ def parse_args(argv: Iterable[str]) -> PlotConfig:
     )
     parser.add_argument(
         "--cmap",
-        default="viridis",
+        default="magma",
         help="Matplotlib colormap name.",
     )
     parser.add_argument(
         "--dpi",
         type=int,
-        default=150,
+        default=200,
         help="DPI for saved figures.",
     )
 
@@ -113,16 +113,16 @@ def plot_tensor(path: Path, cfg: PlotConfig) -> None:
     heatmap_src = tensor_for_heatmap(tensor)
     array = heatmap_src.numpy()
 
-    fig, ax = plt.subplots(figsize=(8, 6))
-    im = ax.imshow(array, aspect="auto", cmap=cfg.cmap)
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(array, cmap=cfg.cmap, aspect="auto")
     ax.set_title(path.stem)
-    ax.set_xlabel("Feature Index")
-    ax.set_ylabel("Row Index")
+    ax.set_xlabel("Wavelength bins")
+    ax.set_ylabel("Wavelength bins")
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     fig.tight_layout()
 
     output_path = cfg.output_dir / f"{path.stem}.png"
-    fig.savefig(output_path, dpi=cfg.dpi, bbox_inches="tight")
+    fig.savefig(output_path, dpi=cfg.dpi)
 
     if cfg.show:
         plt.show()
