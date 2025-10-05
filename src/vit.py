@@ -1,13 +1,10 @@
 import os
-import torch
 from torchmetrics import Accuracy, MeanAbsoluteError, R2Score
 import lightning as L
 
-from src.basemodule import BaseLightningModule, BaseTrainer, BaseSpecDataset, BaseDataModule
+from src.basemodule import BaseLightningModule, BaseTrainer, BaseDataModule
+from src.dataloader import ClassSpecDataset, RegSpecDataset, TestDataset
 # from src.callbacks_pca_warm import PCAWarmStartCallback, CKAProbeCallback
-
-from src.utils import make_dummy_spectra
-
 
 # Use env override for local W&B run files
 # Falls back to ./wandb in the project if not set
@@ -24,114 +21,6 @@ def _normalize_task(config):
     if task in ('classification', 'cls', 'class'):
         return 'cls'
     return 'reg'
-class TestDataset(BaseSpecDataset):
-    def __init__(self, task='classification', **kwargs):
-        super().__init__(**kwargs)
-        self.task = task
-
-    @classmethod
-    def from_config(cls, config):
-        d = super().from_config(config)
-        d.task = 'regression' if _normalize_task(config) == 'reg' else 'classification'
-        return d
-        
-    def load_data(self, stage=None):
-        spectra = make_dummy_spectra(self.num_samples, 4096)
-        self.flux = spectra
-        # Provide a dummy error tensor so DataLoader collate doesn't see None
-        self.error = torch.zeros_like(self.flux) + 1e-3
-        if self.task == 'regression':
-            # Dummy continuous targets
-            self.labels = torch.randn(spectra.shape[0])
-        else:
-            self.labels = torch.randint(0, 2, (spectra.shape[0],)).long()
-
-    def __getitem__(self, idx):
-        return self.flux[idx], self.error[idx], self.labels[idx]
-    
-class ClassSpecDataset(BaseSpecDataset):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-    @classmethod
-    def from_config(cls, config):
-        d = super().from_config(config)
-        return d
-        
-    def load_data(self, stage=None):
-        super().load_data(stage)
-        self.load_params(stage)
-        self.labels = (torch.tensor(self.logg > 2.5)).long()
-
-    def __getitem__(self, idx):
-        flux, error = super().__getitem__(idx)
-        return flux, error, self.labels[idx]
-
-class RegSpecDataset(BaseSpecDataset):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        # Stats used for label normalization (if enabled)
-        self.label_mean = None
-        self.label_std = None
-        self.label_min = None
-        self.label_max = None
-
-    @classmethod
-    def from_config(cls, config):
-        d = super().from_config(config)
-        return d
-
-    def load_data(self, stage=None):
-        super().load_data(stage)
-        self.load_params(stage)
-        # Enforce explicit `data.param` for regression targets
-        if not (
-            (isinstance(getattr(self, 'param', None), str) and len(self.param) > 0)
-            or (isinstance(getattr(self, 'param', None), (list, tuple)) and len(self.param) > 0)
-        ):
-            raise ValueError("Regression requires 'data.param' to be set in the config (string, comma-separated string, or list).")
-        self.labels = torch.tensor(self.param_values).float()  # shape: (N,) or (N,K)
-        # Optional label normalization for regression
-        self._maybe_normalize_labels(stage)
-
-    def __getitem__(self, idx):
-        flux, error = super().__getitem__(idx)
-        return flux, error, self.labels[idx]
-
-    def _maybe_normalize_labels(self, stage=None,  kind=None, eps = 1e-8):
-        kind = getattr(self, 'label_norm', 'none')
-        if kind not in ('standard', 'zscore', 'minmax'):
-            return
-        is_train = stage in (None, 'fit', 'train')
-        # Compute along batch dim; for multi-output K>1, stats are 1D tensors of length K
-        if kind in ('standard', 'zscore'):
-            if is_train or (self.label_mean is None or self.label_std is None):
-                self.label_mean = self.labels.mean(dim=0, keepdim=False)
-                self.label_std = self.labels.std(dim=0, unbiased=False, keepdim=False)
-            std = self.label_std.clone() if isinstance(self.label_std, torch.Tensor) else torch.tensor(self.label_std)
-            std = torch.where(std.abs() < eps, torch.ones_like(std), std)
-            self.labels = (self.labels - self.label_mean) / std
-        elif kind == 'minmax':
-            if is_train or (self.label_min is None or self.label_max is None):
-                self.label_min = self.labels.min(dim=0, keepdim=False).values
-                self.label_max = self.labels.max(dim=0, keepdim=False).values
-            denom = (self.label_max - self.label_min)
-            denom = torch.where(denom.abs() < eps, torch.ones_like(denom), denom)
-            self.labels = (self.labels - self.label_min) / denom
-        # Lightweight log of scalar summaries for visibility
-        try:
-            m = self.label_mean if isinstance(self.label_mean, torch.Tensor) else None
-            s = self.label_std if isinstance(self.label_std, torch.Tensor) else None
-            mi = self.label_min if isinstance(self.label_min, torch.Tensor) else None
-            ma = self.label_max if isinstance(self.label_max, torch.Tensor) else None
-            def _fmt(x):
-                if x is None: return None
-                x = x.detach().cpu().flatten()
-                return [round(float(v), 4) for v in x.tolist()[:4]]  # show up to first 4 dims
-            print(f"[{stage or 'all'} data] label normalization '{kind}': mean={_fmt(m)}, std={_fmt(s)}, min={_fmt(mi)}, max={_fmt(ma)}")
-        except Exception:
-            pass
-    
 #endregion --DATA-----------------------------------------------------------
 #region --DATAMODULE-----------------------------------------------------------
 class ViTDataModule(BaseDataModule):
@@ -161,7 +50,7 @@ class ViTDataModule(BaseDataModule):
 #endregion --DATAMODULE-----------------------------------------------------------
 
 #region MODEL-----------------------------------------------------------
-from src.model import get_model
+from src.models import get_model
 
 #region --TRAINER-----------------------------------------------------------
 class ViTLModule(BaseLightningModule):

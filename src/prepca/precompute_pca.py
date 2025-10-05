@@ -15,76 +15,10 @@ Examples:
 import argparse
 import os
 from pathlib import Path
-from typing import Optional
 
-import numpy as np
 import torch
 
-try:
-    import h5py  # type: ignore
-except Exception:
-    h5py = None  # h5 not required if using npy/pt
-
-
-def load_flux_any(path: str, key: str) -> torch.Tensor:
-    """Load spectra matrix X with shape [N, L] from HDF5/.npy/.pt files.
-
-    - For .h5/.hdf5: reads dataset under 'key'.
-    - For .npy/.npz: loads array; for .npz, use 'key' if present else first.
-    - For .pt/.pth: loads tensor and converts to float32.
-    """
-    p = Path(path)
-    suf = p.suffix.lower()
-    if suf in (".npy", ".npz"):
-        arr = np.load(p, allow_pickle=False)
-        if isinstance(arr, np.lib.npyio.NpzFile):
-            X = arr[key] if key in arr else arr[list(arr.keys())[0]]
-        else:
-            X = arr
-        X = np.asarray(X, dtype=np.float32)
-        return torch.from_numpy(X)
-    if suf in (".pt", ".pth"):
-        X = torch.load(p)
-        return X.float()
-    # HDF5
-    if h5py is None:
-        raise RuntimeError("h5py is not available to load HDF5 files")
-    with h5py.File(p, "r") as f:
-        if key not in f:
-            # try a few fallbacks commonly seen
-            candidates = [
-                key,
-                "flux",
-                "dataset/arrays/flux/value",
-                "dataset/arrays/flux",
-            ]
-            found = None
-            for k in candidates:
-                if k in f:
-                    found = k
-                    break
-            if found is None:
-                raise KeyError(f"Dataset key '{key}' not found in HDF5. Available top-level: {list(f.keys())}")
-            key = found
-        X = f[key][:]
-    X = np.asarray(X, dtype=np.float32)
-    return torch.from_numpy(X)
-
-
-def build_patch_matrix(X: torch.Tensor, patch: int, step: Optional[int] = None) -> torch.Tensor:
-    """Extract length-`patch` windows from each row and stack to [M, patch].
-
-    By default uses non-overlapping windows (step == patch). Use `step` to change
-    the stride (e.g., 1 for fully overlapping).
-    """
-    if X.ndim != 2:
-        raise ValueError(f"Expect [N, L], got {tuple(X.shape)}")
-    step = int(step) if (step is not None and int(step) > 0) else patch
-    # X: [N, L] -> [N, num_patches, patch]
-    patches = X.unfold(1, patch, step)
-    # Flatten to [M, patch]
-    P = patches.contiguous().view(-1, patch)
-    return P, step
+from src.prepca.pipeline import compute_pca, load_spectra
 
 
 def main():
@@ -105,53 +39,39 @@ def main():
 
     torch.manual_seed(int(args.seed))
 
-    X = load_flux_any(args.data, key=args.dataset_key)
-    if args.limit is not None and int(args.limit) > 0 and X.shape[0] > int(args.limit):
-        X = X[: int(args.limit)]
-    print(f"[PCA] Loaded X: {tuple(X.shape)}")
+    data = load_spectra(args.data, dataset_key=args.dataset_key, num_samples=args.limit)
+    flux = data["flux"]
+    print(f"[PCA] Loaded flux: {tuple(flux.shape)}")
 
-    P, step = build_patch_matrix(X, patch=args.patch_size, step=args.step)
-    print(f"[PCA] Patch matrix: {tuple(P.shape)} (M x D)")
+    dev = None
+    if args.device == "cuda" or (args.device == "auto" and torch.cuda.is_available()):
+        dev = torch.device("cuda")
+    elif args.device == "cpu":
+        dev = torch.device("cpu")
 
-    dev = (torch.device("cuda") if (args.device == "cuda" or (args.device == "auto" and torch.cuda.is_available()))
-           else torch.device("cpu"))
-    P = P.to(dev)
+    result = compute_pca(
+        flux,
+        patch_size=args.patch_size,
+        step=args.step,
+        limit=args.limit,
+        device=dev,
+    )
+    step = int(result["step"].item())
+    patch_size = int(result["patch_size"].item())
 
-    # Compute per-feature mean for (optional) bias init
-    mean = P.mean(dim=0).cpu()  # (D,)
-
-    D = int(args.patch_size)
-    with torch.no_grad():
-        # Compute up to D components; center=True gives PCA basis in V
-        try:
-            U, S, V = torch.pca_lowrank(P, q=D, center=True)
-        except:
-            dev = torch.device("cpu")
-            P = P.to(dev)
-            U, S, V = torch.pca_lowrank(P, q=D, center=True)
-
-        # PCA computed on P (M x D); V is (D, D), columns are PCs in feature space
-    # Bring to CPU and save relevant stats
-    V = V.contiguous().cpu()  # (D, D) columns = PCs
-    S = S[:D].contiguous().cpu()     # (D,)
-    U = U[:, :D].contiguous().cpu()  # (M, D)
-    # Explained variance ratio from singular values (centered): proportional to S^2
-    evr = (S ** 2)
-    evr = evr / evr.sum() if float(evr.sum()) > 0 else evr
-
-    out_path = os.path.join(os.environ.get("PCA_DIR", "./data/pca"), args.out or "pca_patch" + f"_{D}_s{step}.pt")
+    out_path = os.path.join(os.environ.get("PCA_DIR", "./data/pca"), args.out or f"pca_patch_{patch_size}_s{step}.pt")
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     torch.save({
-        "U": U,  # left singular vectors for samples (M, k); *not* used for embedding weights
-        "V": V,  # principal components (D, k); columns = PCs used for embedding weights
-        "S": S,
-        "mean": mean,
-        "explained_variance_ratio": evr,
-        "patch_size": D,
+        "U": result["scores"],
+        "V": result["components"],
+        "S": result["singular_values"],
+        "mean": result["mean"],
+        "explained_variance_ratio": result["explained_variance_ratio"],
+        "patch_size": patch_size,
         "step": step,
-        "num_patches": int(P.shape[0]),
+        "num_patches": int(result["num_patches"].item()),
     }, out_path)
-    print(f"[PCA] Saved PCA basis to {out_path} with V={tuple(V.shape)}")
+    print(f"[PCA] Saved PCA basis to {out_path} with V={tuple(result['components'].shape)}")
 
     if args.plot:
         try:
@@ -159,13 +79,14 @@ def main():
             base = os.path.splitext(out_path)[0]
             # Spectrum plot
             plt.figure()
-            plt.plot(S.numpy())
+            plt.plot(result["singular_values"].numpy())
             plt.yscale('log')
             plt.title('PCA singular values')
             plt.tight_layout()
             plt.savefig(base + "_spectrum.png", dpi=150)
             plt.close()
             # Top-10 components
+            V = result["components"]
             k = min(10, V.shape[1])
             plt.figure()
             for i in range(k):

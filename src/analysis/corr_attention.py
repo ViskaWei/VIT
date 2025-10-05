@@ -354,7 +354,7 @@ def frobenius_distance(A: torch.Tensor, B: torch.Tensor) -> float:
 
 
 def cka_similarity(A: torch.Tensor, B: torch.Tensor) -> float:
-    from src.cka import compute_cka
+    from src.prepca.pipeline import compute_cka
 
     return compute_cka(A, B, kernel='linear', debiased=True)
 

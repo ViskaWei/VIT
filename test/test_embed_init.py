@@ -1,7 +1,7 @@
 import os
 import torch
 
-from src.model import get_model
+from src.models import get_model
 
 
 def make_test_pca_patch(path: str, dim: int = 32):

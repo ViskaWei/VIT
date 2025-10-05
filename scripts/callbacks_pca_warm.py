@@ -9,7 +9,7 @@ import lightning as L
 from lightning.pytorch import Trainer, LightningModule, Callback
 
 from src.pca_warm import fit_pca, init_qkv_from_pca
-from src.cka import compute_cka
+from src.prepca.pipeline import compute_cka
 
 
 # L.pytorch.callbacks.ModelCheckpoint(dirpath= SAVE_PATH, filename='{epoch}-{acc_valid:.0f}', save_top_k=1, monitor=f'val_{monitor_name}', mode=monitor_mode)

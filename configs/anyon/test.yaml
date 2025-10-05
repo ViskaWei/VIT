@@ -1,9 +1,12 @@
 warmup:
-  embed: true
-  embed_pca_path: pca_patch_32_s32.pt
-  global: false
-  # global_pca_path: ${PCA_DIR}/pca_4096.pt   # could be a tensor U or dict with {'U', 'S', 'explained_variance_ratio'}
-  # r: 128      # Low-rank dimension for Q/K/V (try 128 or 64)
+  # embed: true
+  # embed_pca_path: pca_patch_32_s32.pt
+  global: true
+  global_pca_path: ${PCA_DIR}/pca_4096.pt   # could be a tensor U or dict with {'U', 'S', 'explained_variance_ratio'}
+  # Load PCA mean vector as input bias for global warmup (mean shape must match D=image_size)
+  bias: true
+  UV: V
+  # r: 128     # Low-rank dimension for Q/K/V (try 128 or 64)
   # freeze_qk_epochs: 5
   # lora: true  # if true, use low-rank (D->r->D) projections for Q/K/V
   # attn_path: "model.vit.encoder.layer.0.attention"
@@ -27,7 +30,7 @@ model:
   num_attention_heads: 1
   # stride_ratio: 1
   # Optional: explicit stride size (overrides stride_ratio when > 0)
-  stride_size: 32
+  stride_ratio: 0.5
   proj_fn: 'SW'
 
 train:

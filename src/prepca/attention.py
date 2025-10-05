@@ -3,7 +3,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from .core import KernelPCAState
+from .pipeline import KernelPCAState
 
 
 class KPCAWarmSelfAttention(nn.Module):

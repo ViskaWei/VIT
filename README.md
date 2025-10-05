@@ -58,3 +58,5 @@ The project centers on building and training Vision Transformer (ViT)–style mo
 
 ./bin/sim model bosz pfs --threads 24 --config /datascope/subaru/user/swei20/data/bosz50000/z0/train.json /datascope/subaru/user/swei20/data/bosz50000/z0/inst_pfs_mr.json --out /datascope/subaru/user/swei20/data/bosz50000/z0/test_1k --sample-count 1000 --seeing 0.5 1.5
 ```
+
+./sweep.sh -e YOUR_ENTITY -p vit-test -c configs/sweeps/uv_proj_sweep.yaml -g 0,1

@@ -1,7 +1,8 @@
 warmup:
-  embed: true
-  embed_pca_path: ${PCA_DIR}/pca_patch_32_s32.pt
-  global: false
+  # embed: true
+  # embed_pca_path: ${PCA_DIR}/pca_4096.pt
+  # UV: V   # Choose which PCA basis key to use ('U' or 'V')
+  # global: true
   # global_pca_path: ${PCA_DIR}/pca_4096.pt   # could be a tensor U or dict with {'U', 'S', 'explained_variance_ratio'}
   # r: 128      # Low-rank dimension for Q/K/V (try 128 or 64)
   # freeze_qk_epochs: 5
@@ -28,7 +29,7 @@ model:
   num_hidden_layers: 2
   num_attention_heads: 1
   stride_size: 32
-  proj_fn: 'SW'
+  proj_fn: 'C1D'
 
 train:
   batch_size: 128

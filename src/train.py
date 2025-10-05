@@ -8,7 +8,7 @@ from lightning.pytorch import Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torchmetrics import Accuracy
 
-from src.model import MyViT
+from src.models import MyViT
 from src.data import prepare_data
 
 torch.manual_seed(42)

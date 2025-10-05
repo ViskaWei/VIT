@@ -1,246 +1,23 @@
 import os
-import h5py
-import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 import lightning as L
-from torch.utils.data import Dataset, TensorDataset, DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from abc import ABC, abstractmethod
-from typing import List, Tuple, Optional, List, Dict, Any, Type
-# from src.utils import create_gif
-from scipy import constants
+from typing import Any, Dict, Optional, Type
+
+from src.dataloader import (
+    BaseDataset,
+    BaseSpecDataset,
+    Configurable,
+    MaskMixin,
+    NoiseMixin,
+    SingleSpectrumNoiseDataset,
+)
+
 #region DATA-----------------------------------------------------------
-class Configurable:
-    init_params = []
-    config_section = None
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]):
-        params = {}
-        for base in cls.__mro__[::-1]:  # Reverse MRO to ensure correct parameter order
-            if issubclass(base, Configurable) and base is not Configurable:
-                if base.config_section:
-                    section = config.get(base.config_section, {})
-                    for param in base.init_params:
-                        if param in section: params[param] = section[param]
-        return cls(**params)
-
-class BaseDataset(Configurable, Dataset, ABC):
-    init_params = ['file_path', 'val_path', 'test_path', 'num_samples', 'num_test_samples', 'indices', 'root_dir', 'param', 'label_norm']
-    config_section = 'data'
-
-    def __init__(self, file_path: str=None, num_samples: Optional[int] = None, test_path=None, num_test_samples: Optional[int] = None, val_path = None, indices: List[int] = None, root_dir: str = './results', param: Optional[str] = None, label_norm: Optional[str] = None, **kwargs):
-        super().__init__(**kwargs)
-        print(file_path, num_samples, test_path, num_test_samples, val_path, indices, root_dir)
-        self.file_path = file_path
-        self.val_path = val_path if val_path is not None else file_path
-        self.test_path = test_path if test_path is not None else file_path
-        self.num_samples = num_samples if num_samples is not None else 1
-        self.num_test_samples = num_test_samples if num_test_samples is not None else min(10000, self.num_samples)
-        self.indices = indices if indices is not None else [0, 1]
-        self.root_dir = root_dir
-        # Optional target parameter(s) to load from HDF; e.g., 'T_eff', 'log_g' or ['T_eff','log_g']
-        self.param = param
-        # Optional label normalization for regression: 'standard'|'zscore'|'minmax'|None
-        self.label_norm = (label_norm or 'none').lower() if isinstance(label_norm, str) else 'none'
-        self.test_data_dict = {}
-        
-    def prepare_data(self):
-        """# called only on 1 GPU Prepare the data for training."""
-        pass
-    @abstractmethod
-    def load_data(self, stage=None):
-        """called on all GPU Load the data from the file."""
-        pass
-    @abstractmethod
-    def __getitem__(self, idx: int):
-        pass
-    def __len__(self) -> int:
-        return self.num_samples
-
-class MaskMixin(Configurable):
-    init_params = ['mask_ratio', 'mask_filler', 'mask', 'lvrg_num', 'lvrg_mask']
-    config_section = 'mask'
-    def __init__(self, mask_ratio: float = None, mask_filler: float = None, mask: List[int] = None, lvrg_num=None, lvrg_mask=None, **kwargs):
-        super().__init__(**kwargs)
-        self.mask_ratio = mask_ratio
-        self.mask_filler = mask_filler
-        self.mask = mask
-        self.lvrg_num = lvrg_num
-        self.lvrg_mask = None
-        
-    def fill_masked(self, tensor, filler=None):
-        if filler is None: return tensor[..., self.mask]
-        return tensor.masked_fill(~self.mask, filler)
-    
-    def create_quantile_mask(self, tensor, ratio=0.9):
-        median = torch.median(tensor, dim=0).values
-        print('median', median.mean())  #ratio: sigma,  0.4: 0.0098, 0.5: 0.01, 0.6: 0.0105, 0.8:0.0129, 0.85:0.0162(1.5) , 0.9: 0.0225, 1:0.048
-        return median < torch.quantile(median, ratio)
-    
-    def create_lvrg_mask(self, wave, pdxs):
-        wave_len = len(wave)
-        mask = np.zeros(wave_len, dtype=bool)
-        wdxs = np.digitize(pdxs, wave)
-        for wdx in wdxs:
-            start, end = max(0, wdx-25), min(wdx+25, wave_len)
-            mask[start:end] = True
-        return mask
-        
-        
-        
-class NoiseMixin(Configurable):
-    init_params = ['noise_level', 'noise_max']
-    config_section = 'noise'
-    def __init__(self, noise_level: float = 1.0, noise_max: Optional[float] = None, **kwargs):
-        super().__init__(**kwargs)
-        self.noise_level = noise_level
-        self.noise_max = noise_max    
-        self.noisy = None
-    @staticmethod
-    def add_noise(flux: torch.Tensor, error: torch.Tensor, noise_level) -> torch.Tensor:
-        return flux + torch.randn_like(flux) * error * noise_level
-    def clamp_sigma(self, sigma):
-        sigma = sigma.clamp(min=1e-6, max=self.noise_max)
-        if self.noise_max is None: self.noise_max = round(sigma.max().item(), 2)
-        self.sigma_rms = torch.sqrt(sigma.pow(2).mean(dim=-1)).mean()  #0.048 
-        print('sigma_noise', self.sigma_rms)
-        return sigma
-
-
-class SingleSpectrumNoiseDataset(Dataset):
-    def __init__(self, flux_0: torch.Tensor, error_0: torch.Tensor,
-                 noise_level: float = 1.0, repeat: int = 1000, seed: int = 42):
-        super().__init__()
-        self.repeat = repeat
-        self.noise_level = noise_level
-        self.L = len(flux_0) 
-        self.flux_0 = flux_0
-        self.error_0 = error_0
-
-        torch.manual_seed(seed)
-        noise = torch.randn(repeat, self.L) * self.error_0 * self.noise_level
-        self.noisy = self.flux_0 + noise
-        print(self.noisy.shape, self.flux_0.shape, self.error_0.shape)
-
-    def __len__(self):
-        return self.repeat
-
-    def __getitem__(self, idx):
-        return self.noisy[idx], self.flux_0, self.error_0
-        
-class BaseSpecDataset(MaskMixin, NoiseMixin, BaseDataset):   
-    def get_path_and_samples(self, stage):
-        if stage == 'fit' or stage == 'train' or stage is None:
-            return self.file_path, self.num_samples
-        else:
-            load_path = self.test_path if stage == 'test' else self.val_path
-            return load_path, self.num_test_samples            
-        
-    def replace_nan_with_mean(self, tensor: torch.Tensor) -> torch.Tensor:
-        nan_mask = torch.isnan(tensor)
-        mean_value = torch.median(tensor[~nan_mask])
-        tensor[nan_mask] = mean_value
-        return tensor
-
-    def fill_nan_with_nearest(self, tensor):
-        if torch.isnan(tensor[:, 0]).any():
-            tensor[:, 0] = tensor[:, 1]  # Copy from second column
-        if torch.isnan(tensor[:, -1]).any():
-            tensor[:, -1] = tensor[:, -2]  # Copy from second last column
-        return tensor
-
-    def load_data(self, stage=None) -> None:
-        load_path, num_samples = self.get_path_and_samples(stage)  
-        print('loading data from', load_path, num_samples)          
-        with h5py.File(load_path, 'r') as f:
-            # Force float32 to avoid inadvertent float64 tensors (which double memory)
-            self.wave = torch.tensor(f['spectrumdataset/wave'][()], dtype=torch.float32)
-            self.flux = torch.tensor(f['dataset/arrays/flux/value'][:num_samples], dtype=torch.float32)
-            self.error = torch.tensor(f['dataset/arrays/error/value'][:num_samples], dtype=torch.float32)
-
-        self.flux = self.flux.clip(min=0.0)
-        # self.error = self.error0.clip(min=1e-6, max=1.0)
-        self.num_samples = self.flux.shape[0]
-        self.num_pixels = len(self.wave)
-        if self.error.isnan().any():
-            # print(torch.isnan(self.error).sum())
-            self.error = self.fill_nan_with_nearest(self.error)
-        self.snr_no_mask =self.flux.norm(dim=-1) / self.error.norm(dim=-1)
-        print(self.flux.shape, self.error.shape, self.wave.shape, self.num_samples, self.num_pixels)
-
-          
-    def load_snr(self, stage=None, load_df=False) -> None:
-        load_path, num_samples = self.get_path_and_samples(stage)  
-        df = pd.read_hdf(load_path)[:num_samples]          
-        self.z = df['redshift'].values
-        self.rv = self.z * constants.c / 1000
-        self.mag = df['mag'].values
-        self.snr00 = df['snr'].values
-        if load_df: self.df = df
-    
-    def load_z(self, stage=None) -> None:
-        load_path, num_samples = self.get_path_and_samples(stage)  
-        df = pd.read_hdf(load_path)[:num_samples]          
-        self.z = df['redshift'].values
-        self.rv = self.z * constants.c / 1000
-        
-    def load_params(self, stage=None, load_df=False) -> None:
-        """
-        Load stellar parameter(s) from the HDF file.
-        - If self.param is provided (from config `data.param`), only that column is loaded
-          into `self.param_values`.
-        - Otherwise, load the default set of parameters for backward compatibility.
-        """
-        load_path, num_samples = self.get_path_and_samples(stage)
-        df = pd.read_hdf(load_path)[:num_samples]
-
-        if isinstance(self.param, str) and len(self.param) > 0:
-            # Support comma-separated multi-params in a string, e.g. "T_eff,log_g,M_H"
-            param_list = [p.strip() for p in self.param.split(',') if p.strip()]
-            if len(param_list) == 1:
-                if param_list[0] not in df.columns:
-                    raise KeyError(f"Requested param '{param_list[0]}' not found in HDF columns: {list(df.columns)}")
-                self.param_values = df[param_list[0]].values
-            else:
-                for p in param_list:
-                    if p not in df.columns:
-                        raise KeyError(f"Requested param '{p}' not found in HDF columns: {list(df.columns)}")
-                # Shape: (N, K)
-                self.param_values = df[param_list].values
-        elif isinstance(self.param, (list, tuple)) and len(self.param) > 0:
-            for p in self.param:
-                if p not in df.columns:
-                    raise KeyError(f"Requested param '{p}' not found in HDF columns: {list(df.columns)}")
-            self.param_values = df[list(self.param)].values
-        else:
-            # Backward-compatible behavior: load common parameters
-            self.teff = df['T_eff'].values
-            self.mh = df['M_H'].values
-            self.am = df['a_M'].values
-            self.cm = df['C_M'].values
-            self.logg = df['log_g'].values
-            self.logg2 = self.logg < 2.5
-        if load_df:
-            self.df = df
-        # self.gd_labels = self.logg < 2.5
-            
-    def __getitem__(self, idx: int):
-        return self.flux[idx], self.error[idx]
-
-    def apply_mask(self):
-        self.flux = self.fill_masked(self.flux, filler=self.mask_filler)        
-        self.error = self.fill_masked(self.error, filler=self.mask_filler)        
-        self.wave = self.wave[self.mask] if self.mask is not None else self.wave
-        self.num_pixels = len(self.wave)
+# NOTE: Dataset classes now live under src.dataloader.* and are imported above.
 #endregion DATA-----------------------------------------------------------
-#region DATATEST-----------------------------------------------------------
-# if __name__ == '__main__':
-#     d = BaseSpecMaskDataset.from_config({'data': {'file_path': './tests/spec/test_dataset.h5', 'num_samples': 10000}, 'mask': {'mask_ratio': 0.9}})
-#     wave, flux, error = d.load_spec()
-#     s = d.process_sigma(error, ratio=d.mask_ratio)
-#     print(wave.shape, flux.shape, error.shape, s.shape)
-#endregion DATASET-----------------------------------------------------------
 #region DM-----------------------------------------------------------
 class BaseDataModule(L.LightningDataModule):
     def __init__(self, batch_size: int = 256, num_workers: int = 24, debug: bool = False, dataset_cls: Optional[Type['BaseDataset']] = None, config: Dict[str, Any] = {}):
@@ -540,3 +317,19 @@ class OptModule():
             raise ValueError(f"Unknown scheduler: {self.lr_scheduler_name}")
         scheduler = self.lr_schedulers[self.lr_scheduler_name](optimizer, **self.kwargs)
         return {"optimizer": optimizer, "lr_scheduler": scheduler, 'monitor': f'{self.monitor_name}'}
+
+
+__all__ = [
+    "Configurable",
+    "BaseDataset",
+    "MaskMixin",
+    "NoiseMixin",
+    "SingleSpectrumNoiseDataset",
+    "BaseSpecDataset",
+    "BaseDataModule",
+    "BaseModel",
+    "BaseLightningModule",
+    "BaseTrainer",
+    "PlotCallback",
+    "OptModule",
+]
