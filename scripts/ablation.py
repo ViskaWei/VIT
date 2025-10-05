@@ -5,6 +5,8 @@ supplied) ablation modes. Each mode corresponds to a statistics artifact
 produced by `scripts/fit_preprocessor.py`. For every entry we patch the base
 configuration with the appropriate `warmup.stats_path` and launch an
 `Experiment`.
+python3 scripts/fit_preprocessor.py --config "$CONFIG_DIR/zca.yaml"  --mode zca --output "$PCA_DIR/zca.pt"
+python3 scripts/ablation.py --config "$CONFIG_DIR/run.yaml" --wandb
 """
 
 from __future__ import annotations
