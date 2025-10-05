@@ -33,7 +33,13 @@ import torch.nn.functional as F
 
 from src.utils import load_config
 from src.dataloader.spec_datasets import ClassSpecDataset, RegSpecDataset
-from evals.zca_util import zca_report as compute_zca_report
+from src.prepca.preprocessor_utils import (
+    CovarianceStats,
+    compute_whitening_metrics,
+    compute_zca_diagnostics,
+    load_or_compute_covariance,
+    zca_self_check,
+)
 
 
 Tensor = torch.Tensor
@@ -76,17 +82,6 @@ def _get_label_tensor(dataset, task: str, num_labels: int, limit: Optional[int])
     if labels.dim() == 1:
         labels = labels.unsqueeze(-1)
     return labels.to(torch.float64)
-
-
-def _covariance_stats(dataset, limit: Optional[int]) -> Tuple[Tensor, Tensor, int]:
-    mean = dataset.mean_flux.to(torch.float64)
-    cov = dataset.covariance.to(torch.float64)
-    num_samples = int(dataset.num_samples)
-    if limit is not None and 0 < limit < num_samples:
-        raise ValueError(
-            "Limiting the dataset requires recomputing covariance; rerun without --limit"
-        )
-    return mean, cov, num_samples
 
 
 def _compute_cross_stats(
@@ -134,53 +129,75 @@ def _shrink_covariance(cov: Tensor, shrinkage: float) -> Tensor:
 
 
 def _zca_matrix(
-    cov: Tensor,
+    cov: torch.Tensor,
     eps: float,
     shrinkage: float,
     rank: Optional[int],
     perp_mode: str,
     perp_scale: Optional[float],
-) -> Tuple[Tensor, Tensor, Tensor, Tensor, Optional[float]]:
-    cov = _symmetrize(cov)
-    cov_hat = _shrink_covariance(cov, shrinkage)
+    *,
+    eigvals: Optional[Tensor] = None,
+    eigvecs: Optional[Tensor] = None,
+):
+    # 1) 对称化 + eigh（降序）
+    if eigvals is None or eigvecs is None:
+        cov = 0.5 * (cov + cov.t())
+        eigvals_raw, eigvecs_raw = torch.linalg.eigh(cov)
+        idx = torch.argsort(eigvals_raw, descending=True)
+        eigvals = eigvals_raw[idx]
+        eigvecs = eigvecs_raw[:, idx]
+    else:
+        eigvals = eigvals.to(torch.float64)
+        eigvecs = eigvecs.to(torch.float64)
 
-    eigvals, eigvecs = torch.linalg.eigh(cov_hat)
-    idx = torch.argsort(eigvals, descending=True)
-    eigvals = eigvals[idx]
-    eigvecs = eigvecs[:, idx]
-    cov_used = _scaled_outer(eigvecs, eigvals)
-    eigvals_eps = eigvals + eps
-    inv_sqrt = torch.rsqrt(eigvals_eps)
-    dim = cov.shape[0]
-    if rank is None or rank <= 0 or rank >= eigvals.numel():
-        matrix = _scaled_outer(eigvecs, inv_sqrt)
-        projector = torch.eye(dim, dtype=cov.dtype, device=cov.device)
-        return matrix, projector, eigvals, cov_used, None
+    # 2) 对特征值做收缩（等价于 (1-γ)C + γ·avg·I）
+    if shrinkage > 0.0:
+        avg = eigvals.mean()
+        eigvals_hat = (1.0 - shrinkage) * eigvals + shrinkage * avg
+    else:
+        eigvals_hat = eigvals
 
+    # 3) 显式构造 cov_hat（自检要用它）
+    cov_hat = eigvecs @ torch.diag(eigvals_hat) @ eigvecs.t()
+
+    # 4) ZCA：只用一次 inv_sqrt（单边缩放），千万别“平方”成 λ^{-1}
+    inv_sqrt = torch.rsqrt(eigvals_hat + eps)
+
+    D = eigvals_hat.numel()
+    if rank is None or rank <= 0 or rank >= D:
+        # 全秩
+        P = (eigvecs * inv_sqrt) @ eigvecs.t()     # = V diag((λ+eps)^-1/2) V^T
+        projector = eigvecs @ eigvecs.t()          # = I
+        (rel, cond0, cond1) = zca_self_check(P, cov_hat, eps=0.0)
+        print(f"[zca] self-check: rel_err={rel:.3e}, cond_before={cond0:.3e}, cond_after={cond1:.3e}")
+        return P, projector, eigvals_hat, cov_hat, None
+
+    # 5) 低秩
     r = int(rank)
-    lead = eigvecs[:, :r]
-    inv_sqrt_r = inv_sqrt[:r]
-    matrix = _scaled_outer(lead, inv_sqrt_r)
-    projector = lead @ lead.t()
+    Vr = eigvecs[:, :r]
+    inv_sqrt_r = torch.rsqrt(eigvals_hat[:r] + eps)
+    P = (Vr * inv_sqrt_r) @ Vr.t()
+    projector = Vr @ Vr.t()
 
+    # 余空间缩放
     if perp_scale is not None:
-        scale_val = perp_scale
+        s = float(perp_scale)
     else:
         mode = (perp_mode or "zero").lower()
         if mode == "identity":
-            scale_val = 1.0
-        elif mode == "avg" and r < eigvals.numel() - 1:
-            resid = eigvals[r:]
-            scale_val = float(torch.rsqrt(resid.mean() + eps))
+            s = 1.0
+        elif mode == "avg" and r < D - 1:
+            resid = eigvals_hat[r:]
+            s = float(torch.rsqrt(resid.mean() + eps))
         else:
-            scale_val = 0.0
+            s = 0.0
+    if s != 0.0:
+        I = torch.eye(D, dtype=cov.dtype, device=cov.device)
+        P = P + s * (I - projector)
+    # test: P.T x C x P − I | ​/ I ​--> 0 (whitening self-consistency)
+    (rel, cond0, cond1) = zca_self_check(P, cov_hat, eps=0.0, lowrank=True, Vr=Vr)
 
-    scale_out: Optional[float] = float(scale_val)
-    if scale_val != 0.0:
-        eye = torch.eye(dim, dtype=cov.dtype, device=cov.device)
-        matrix = matrix + scale_val * (eye - projector)
-
-    return matrix, projector, eigvals, cov_used, scale_out
+    return P, projector, eigvals_hat, cov_hat, s
 
 
 def _projector_from_basis(
@@ -255,22 +272,100 @@ def _compose_bias(mean: Tensor, matrix: Tensor) -> Tensor:
 
 def fit_preprocessor(args: argparse.Namespace) -> None:
     config = load_config(args.config)
-    dataset, task = _select_dataset(config)
+    data_cfg = config.get("data", {}) or {}
+    cov_path_cfg = data_cfg.get("cov_path")
+    cov_save_path_cfg = data_cfg.get("save_path")
+
+    cov_stats: Optional[CovarianceStats] = None
+    cov_stats_path: Optional[Path] = None
+
+    dataset = None
+    flux: Optional[Tensor] = None
+    wave: Optional[Tensor] = None
+    stats_from_dataset = False
+
+    requires_targets = args.mode in {"pls", "cca"}
+    requires_flux_for_limit = args.limit is not None and args.limit > 0
     num_labels = int(config.get("model", {}).get("num_labels", 1) or 1)
 
-    mean_x, cov_x, n_samples = _covariance_stats(dataset, args.limit)
+    # Try to load covariance from cov_path if provided
+    if cov_path_cfg:
+        cov_path = Path(cov_path_cfg)
+        if cov_path.exists():
+            try:
+                cov_stats = load_or_compute_covariance(cov_path_cfg)
+                cov_stats_path = cov_path
+                print(f"[fit] Loaded covariance statistics from {cov_stats_path}")
+            except Exception as exc:
+                raise RuntimeError(f"Failed to load covariance stats at {cov_path_cfg}: {exc}") from exc
 
-    flux = dataset.flux.view(dataset.num_samples, -1)
-    flux = _ensure_limit(flux, args.limit).to(torch.float64)
+    # If covariance not loaded, need to compute it from dataset
+    if cov_stats is None:
+        dataset, task = _select_dataset(config)
+        dataset.load_data(stage="train")
+        wave = dataset.wave.detach().cpu() if hasattr(dataset, "wave") else None
+        flux_cpu = dataset.flux.detach().cpu().view(dataset.num_samples, -1)
+        flux_cpu = _ensure_limit(flux_cpu, args.limit)
+        
+        # Determine save location
+        save_path = cov_save_path_cfg or cov_path_cfg
+        if save_path is None:
+            save_path = Path(args.output).with_name("cov.pt")
+        
+        cov_stats = load_or_compute_covariance(
+            cov_path=None,  # Force computation since we didn't load
+            data=flux_cpu,
+            save_path=save_path,
+            wave=wave
+        )
+        cov_stats_path = Path(save_path)
+        flux = flux_cpu.to(torch.float64)
+        stats_from_dataset = True
+        print(f"[fit] Computed covariance statistics and saved to {cov_stats_path}")
+    else:
+        task = _normalise_task(config)
 
-    if args.mode in {"pls", "cca"}:
+    # Load dataset if needed for targets or flux limit
+    if dataset is None and (requires_targets or requires_flux_for_limit):
+        try:
+            dataset, task = _select_dataset(config)
+            dataset.load_data(stage="train")
+        except Exception as exc:
+            raise RuntimeError(
+                "Selected preprocessing mode requires dataset access but data.file_path is missing; please provide it in the config."
+            ) from exc
+
+    if dataset is not None and flux is None:
+        wave = dataset.wave.detach().cpu() if hasattr(dataset, "wave") else wave
+        flux_cpu = dataset.flux.detach().cpu().view(dataset.num_samples, -1)
+        flux_cpu = _ensure_limit(flux_cpu, args.limit)
+        flux = flux_cpu.to(torch.float64)
+
+    if flux is None and requires_targets:
+        raise RuntimeError(
+            "PLS/CCA modes require dataset access to compute targets; please provide data.file_path in the config."
+        )
+
+    stats64 = cov_stats.to(torch.float64)
+    mean_x = stats64.mean
+    cov_x = stats64.cov
+    eigvals_stats = stats64.eigvals
+    eigvecs_stats = stats64.eigvecs
+    order = torch.argsort(eigvals_stats, descending=True)
+    eigvals_sorted = eigvals_stats[order]
+    eigvecs_sorted = eigvecs_stats[:, order]
+    n_samples = cov_stats.num_samples
+    if n_samples <= 0 and flux is not None:
+        n_samples = flux.shape[0]
+    dim = cov_x.shape[0]
+
+    if requires_targets and dataset is not None:
         targets = _get_label_tensor(dataset, task, num_labels, args.limit)
         mean_y, cov_y, cov_xy = _compute_cross_stats(flux, targets, mean_x)
     else:
         targets = None
         mean_y = cov_y = cov_xy = None
 
-    dim = flux.shape[1]
     eps = float(args.eps)
     shrinkage = float(args.shrinkage)
     rank = args.rank
@@ -279,6 +374,8 @@ def fit_preprocessor(args: argparse.Namespace) -> None:
 
     cov_used: Optional[Tensor] = None
     complement_scale: Optional[float] = None
+    projector: Optional[Tensor] = None
+    spectrum: Optional[Tensor] = None
 
     if args.mode == "center":
         matrix = torch.eye(dim, dtype=torch.float64)
@@ -288,26 +385,45 @@ def fit_preprocessor(args: argparse.Namespace) -> None:
         matrix = torch.diag(inv_std)
     elif args.mode == "zca":
         matrix, projector, spectrum, cov_used, complement_scale = _zca_matrix(
-            cov_x, eps, shrinkage, None, args.perp_mode, args.perp_scale
+            cov_x,
+            eps,
+            shrinkage,
+            None,
+            args.perp_mode,
+            args.perp_scale,
+            eigvals=eigvals_sorted,
+            eigvecs=eigvecs_sorted,
         )
     elif args.mode == "zca_lowrank":
         if rank is None:
             raise ValueError("--rank is required for zca_lowrank mode")
         matrix, projector, spectrum, cov_used, complement_scale = _zca_matrix(
-            cov_x, eps, shrinkage, rank, args.perp_mode, args.perp_scale
+            cov_x,
+            eps,
+            shrinkage,
+            rank,
+            args.perp_mode,
+            args.perp_scale,
+            eigvals=eigvals_sorted,
+            eigvecs=eigvecs_sorted,
         )
     elif args.mode == "project_lowrank":
         if rank is None:
             raise ValueError("--rank is required for project_lowrank mode")
-        eigvals, eigvecs = torch.linalg.eigh(cov_x)
-        idx = torch.argsort(eigvals, descending=True)
-        lead = eigvecs[:, idx][:, :rank]
+        lead = eigvecs_sorted[:, :rank]
         matrix = _projector_from_basis(lead)
         projector = matrix
-        spectrum = eigvals[idx]
+        spectrum = eigvals_sorted
     elif args.mode == "randrot_white":
         matrix_zca, projector, spectrum, cov_used, complement_scale = _zca_matrix(
-            cov_x, eps, shrinkage, None, args.perp_mode, args.perp_scale
+            cov_x,
+            eps,
+            shrinkage,
+            None,
+            args.perp_mode,
+            args.perp_scale,
+            eigvals=eigvals_sorted,
+            eigvecs=eigvecs_sorted,
         )
         rotation = _random_rotation(dim, args.seed)
         matrix = matrix_zca @ rotation
@@ -319,16 +435,14 @@ def fit_preprocessor(args: argparse.Namespace) -> None:
     elif args.mode == "pca":
         if rank is None:
             raise ValueError("--rank is required for pca mode")
-        eigvals, eigvecs = torch.linalg.eigh(cov_x)
-        idx = torch.argsort(eigvals, descending=True)
-        lead = eigvecs[:, idx][:, :rank]
+        lead = eigvecs_sorted[:, :rank]
         if args.whiten:
-            vals = eigvals[idx][:rank]
+            vals = eigvals_sorted[:rank]
             matrix = _projector_from_basis(lead, torch.rsqrt(vals + eps))
         else:
             matrix = _projector_from_basis(lead)
         projector = matrix
-        spectrum = eigvals[idx]
+        spectrum = eigvals_sorted
     elif args.mode == "pls":
         if targets is None:
             raise RuntimeError("Targets are required for PLS mode")
@@ -350,60 +464,64 @@ def fit_preprocessor(args: argparse.Namespace) -> None:
 
     matrix = matrix.to(torch.float64)
     whiten_metrics: Optional[Dict[str, float]] = None
-    if cov_used is not None:
+    if cov_used is not None and projector is not None:
         cov_used = cov_used.to(matrix.dtype)
-        target = projector
-        if complement_scale is not None:
-            eye = torch.eye(dim, dtype=matrix.dtype, device=matrix.device)
-            resid = eye - projector
-            target = projector + (complement_scale ** 2) * (resid @ cov_used @ resid)
-        diff = matrix.t() @ cov_used @ matrix - target
-        max_abs = float(diff.abs().max().item())
-        denom = float(target.abs().max().item())
-        rel = max_abs / max(denom, 1e-12)
-        whiten_metrics = {"max_abs": max_abs, "rel_max_abs": rel}
-        print(f"[zca-fit] whitening check: max_abs={max_abs:.3e}, rel={rel:.3e}")
+        whiten_metrics = compute_whitening_metrics(
+            matrix,
+            cov_used,
+            projector.to(matrix.dtype),
+            complement_scale=complement_scale,
+        )
+        if whiten_metrics is not None:
+            print(
+                f"[zca-fit] whitening check: max_abs={whiten_metrics['max_abs']:.3e}, "
+                f"rel={whiten_metrics['rel_max_abs']:.3e}"
+            )
 
     zca_metrics: Optional[Dict[str, float]] = None
     if args.mode.startswith("zca"):
         cov_for_report = cov_used if cov_used is not None else _symmetrize(cov_x)
-        report = compute_zca_report(
-            flux,
-            mean_x,
-            cov_for_report,
-            matrix,
-            float(shrinkage),
-        )
-        zca_metrics = {key: float(value) for key, value in report.items()}
-        print("[zca-fit] ZCA report:")
-        print("sym_err (checking whether cov is symmetric) ~ 0 (e.g. <1e-6)")
-        print("white_err_self (self-consistency of whitening) ~ 0.1 (e.g. <1e-1)")
-        print("white_err_onX (how well whitened X matches identity) should be close to white_err_self")
-        print("cond_Ih (condition number of whitened cov) should be reasonable (e.g. <1e3)")
-        print("off_ratio_P (off-diagonal energy in P) should be small (e.g. <1e-1)")
-        for key, value in zca_metrics.items():
-            print(f"    {key}: {value:.6e}")
+        zca_metrics = compute_zca_diagnostics(flux, mean_x, cov_for_report, matrix, shrinkage)
+        if zca_metrics is not None:
+            print("[zca-fit] ZCA report:")
+            print("sym_err (checking whether cov is symmetric) ~ 0 (e.g. <1e-6)")
+            print("white_err_self (self-consistency of whitening) ~ 0.1 (e.g. <1e-1)")
+            print("white_err_onX (how well whitened X matches identity) should be close to white_err_self")
+            print("cond_Ih (condition number of whitened cov) should be reasonable (e.g. <1e3)")
+            print("off_ratio_P (off-diagonal energy in P) should be small (e.g. <1e-1)")
+            for key, value in zca_metrics.items():
+                print(f"    {key}: {value:.6e}")
+        else:
+            print("[zca-fit] Skipped ZCA diagnostics (flux data unavailable)")
 
     bias = _compose_bias(mean_x, matrix)
 
     matrix32 = matrix.to(torch.float32)
+    metadata: Dict[str, Optional[object]] = {
+        "mode": args.mode,
+        "rank": rank,
+        "eps": eps,
+        "shrinkage": shrinkage,
+        "whiten": bool(args.whiten),
+        "seed": int(args.seed),
+        "num_samples": n_samples,
+        "perp_mode": args.perp_mode,
+        "perp_scale": args.perp_scale,
+        "cov_stats_source": "computed" if stats_from_dataset else "loaded",
+    }
+    if cov_stats_path is not None:
+        metadata["cov_stats_path"] = str(cov_stats_path)
+    data_path = data_cfg.get("file_path")
+    if data_path:
+        metadata["data_path"] = data_path
+
     payload = {
         "matrix": matrix32,
         "linear_weight": matrix32,
         "bias": bias.to(torch.float32),
         "mean": mean_x.to(torch.float32),
         "cov": cov_x.to(torch.float32),
-        "metadata": {
-            "mode": args.mode,
-            "rank": rank,
-            "eps": eps,
-            "shrinkage": shrinkage,
-            "whiten": bool(args.whiten),
-            "seed": int(args.seed),
-            "num_samples": n_samples,
-            "perp_mode": args.perp_mode,
-            "perp_scale": args.perp_scale,
-        },
+        "metadata": metadata,
     }
     if args.mode in {"zca", "zca_lowrank", "project_lowrank", "pca"}:
         payload["eigenvalues"] = spectrum.to(torch.float32)

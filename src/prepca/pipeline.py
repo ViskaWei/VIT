@@ -45,17 +45,6 @@ def load_spectra(
     return payload
 
 
-def _sym_limits_from_percentiles(A: np.ndarray, clip: float = 1.0) -> Tuple[float, float]:
-    lo = float(np.nanpercentile(A, clip))
-    hi = float(np.nanpercentile(A, 100 - clip))
-    vmax = max(abs(lo), abs(hi))
-    if not np.isfinite(vmax) or vmax <= 0.0:
-        vmax = float(np.nanmax(np.abs(A)))
-    if not np.isfinite(vmax) or vmax <= 0.0:
-        vmax = 1.0
-    return -vmax, vmax
-
-
 def _sorted_eigh_sym(cov: Tensor) -> Tuple[Tensor, Tensor]:
     cov_sym = 0.5 * (cov + cov.transpose(-1, -2))
     eigvals, eigvecs = torch.linalg.eigh(cov_sym)
@@ -85,117 +74,40 @@ def ensure_covariance(
         covariance heatmap X/Y tick labels are annotated with the corresponding
         wavelengths for readability.
     """
-
+    # Import here to avoid circular dependency
+    from src.prepca.preprocessor_utils import load_or_compute_covariance
+    
     if cov_path is None:
-        if allow_compute:
-            raise ValueError("cov_path must be supplied when allow_compute=True to avoid overwriting shared stats")
-        raise FileNotFoundError("cov_path must be provided when allow_compute=False")
+        if not allow_compute:
+            raise FileNotFoundError("cov_path must be provided when allow_compute=False")
+        # Use default path if computing
+        cov_path = Path("data/pca/covariance_stats.pt")
 
     cov_path = Path(cov_path)
-    cov_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if allow_compute and cov_path.exists():
-        raise FileExistsError(
-            f"Covariance file {cov_path} already exists; refuse to overwrite when allow_compute=True"
-        )
-
+    
+    # Use the new utility function
     if cov_path.exists():
-        payload = torch.load(cov_path)
-        if not isinstance(payload, dict) or "cov" not in payload:
-            raise ValueError(f"Invalid covariance payload stored at {cov_path}")
-        eigvals = payload.get("eigvals")
-        eigvecs = payload.get("eigvecs")
-        if eigvals is None or eigvecs is None:
-            cov_loaded = payload["cov"]
-            eigvals, eigvecs = _sorted_eigh_sym(cov_loaded)
-            eigvals = eigvals.to(cov_loaded.dtype)
-            eigvecs = eigvecs.to(cov_loaded.dtype)
-            payload["eigvals"] = eigvals
-            payload["eigvecs"] = eigvecs
-            try:
-                torch.save({k: (v.cpu() if isinstance(v, torch.Tensor) else v) for k, v in payload.items()}, cov_path)
-            except Exception as exc:  # pragma: no cover - best-effort update
-                warnings.warn(f"Failed to update covariance payload with eigenpairs: {exc}")
-        return {
-            "mean": payload["mean"],
-            "cov": payload["cov"],
-            "num_samples": payload.get("num_samples", torch.tensor(-1)),
-            "eigvals": payload["eigvals"],
-            "eigvecs": payload["eigvecs"],
-        }
-
-    if not allow_compute:
+        # Load existing
+        cov_stats = load_or_compute_covariance(cov_path=cov_path)
+    elif allow_compute:
+        # Compute and save
+        cov_stats = load_or_compute_covariance(
+            cov_path=None,
+            data=data,
+            save_path=cov_path,
+            wave=wave
+        )
+    else:
         raise FileNotFoundError(f"Covariance file {cov_path} not found and computation disabled")
-
-    data = data.to(torch.float32)
-    mean = data.mean(dim=0, keepdim=False)
-    centered = data - mean
-    cov = centered.t().matmul(centered) / (centered.shape[0] - 1)
-    eigvals, eigvecs = _sorted_eigh_sym(cov)
-    eigvals = eigvals.to(cov.dtype)
-    eigvecs = eigvecs.to(cov.dtype)
-    stats = {
-        "mean": mean,
-        "cov": cov,
-        "num_samples": torch.tensor(data.shape[0]),
-        "eigvals": eigvals,
-        "eigvecs": eigvecs,
+    
+    # Return in the old dict format for backward compatibility
+    return {
+        "mean": cov_stats.mean,
+        "cov": cov_stats.cov,
+        "num_samples": torch.tensor(cov_stats.num_samples),
+        "eigvals": cov_stats.eigvals,
+        "eigvecs": cov_stats.eigvecs,
     }
-    torch.save({k: (v.cpu() if isinstance(v, torch.Tensor) else v) for k, v in stats.items()}, cov_path)
-
-    heatmap_path = cov_path.with_name(f"{cov_path.stem}_heatmap.png")
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg", force=True)
-        import matplotlib.pyplot as plt
-        from matplotlib import colors
-
-        cov_np = cov.detach().cpu().numpy()
-        vmin, vmax = _sym_limits_from_percentiles(cov_np, clip=3.0)
-        if vmin >= vmax:
-            vmax = vmin + 1e-6
-        norm = colors.TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
-
-        fig, ax = plt.subplots(figsize=(6, 5))
-        image = ax.imshow(cov_np, cmap="magma", aspect="auto", norm=norm)
-        cbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
-        cbar.ax.tick_params(labelsize=9)
-        ax.set_title("Covariance Heatmap")
-
-        tick_wave_np: Optional[np.ndarray] = None
-        if wave is not None:
-            wave_view = wave.detach().cpu().reshape(-1)
-            if wave_view.numel() == cov_np.shape[0]:
-                tick_wave_np = wave_view.numpy()
-            else:
-                warnings.warn(
-                    "Provided wavelength grid does not match covariance dimension; using pixel indices instead",
-                    RuntimeWarning,
-                )
-
-        if tick_wave_np is not None:
-            max_ticks = 10 if tick_wave_np.size >= 10 else tick_wave_np.size
-            idx = np.linspace(0, tick_wave_np.size - 1, max_ticks, dtype=int)
-            ax.set_xticks(idx)
-            ax.set_yticks(idx)
-            tick_labels = [f"{tick_wave_np[i]:.0f}" for i in idx]
-            ax.set_xticklabels(tick_labels, rotation=45, ha="right")
-            ax.set_yticklabels(tick_labels)
-            ax.set_xlabel("Wavelength")
-            ax.set_ylabel("Wavelength")
-        else:
-            ax.set_xlabel("Wavelength idx")
-            ax.set_ylabel("Wavelength idx")
-
-        fig.tight_layout()
-        fig.savefig(heatmap_path, dpi=200)
-        plt.close(fig)
-        print(f"Saved covariance heatmap at {heatmap_path}")
-    except Exception as exc:  # pragma: no cover - best-effort visual aid
-        warnings.warn(f"Failed to save covariance heatmap at {heatmap_path}: {exc}")
-
-    return stats
 
 
 # ---------------------------------------------------------------------------

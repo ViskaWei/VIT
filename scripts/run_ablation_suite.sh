@@ -14,7 +14,7 @@ STATS_ROOT=${STATS_ROOT:-"$PCA_DIR"}
 
 mkdir -p "$STATS_ROOT"
 
-RANK=${RANK:-256}
+RANK=${RANK:-64}
 EPS=${EPS:-1e-5}
 SHRINKAGE=${SHRINKAGE:-0.0}
 SEED=${SEED:-0}
@@ -38,8 +38,8 @@ run_fit() {
 
 # run_fit center
 # run_fit standardize
-run_fit zca zca --eps "$EPS" --shrinkage "$SHRINKAGE"
-# run_fit zca_lowrank zca_lowrank --rank "$RANK" --eps "$EPS" --shrinkage "$SHRINKAGE" --perp-mode avg
+# run_fit zca zca --eps "$EPS" --shrinkage "$SHRINKAGE"
+run_fit zca_lowrank zca_lowrank --rank "$RANK" --eps "$EPS" --shrinkage "$SHRINKAGE" --perp-mode avg
 # run_fit project_lowrank project_lowrank --rank "$RANK"
 # run_fit randrot_white randrot_white --seed "$SEED" --eps "$EPS" --shrinkage "$SHRINKAGE"
 # run_fit randrot randrot --seed "$SEED"
