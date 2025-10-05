@@ -308,6 +308,7 @@ class BaseSpecDataset(MaskMixin, NoiseMixin, BaseDataset):
             self.flux.detach().cpu().reshape(self.num_samples, -1),
             self.cov_path,
             allow_compute=allow_compute,
+            wave=self.wave.detach().cpu(),
         )
         self.covariance_stats = stats
         self.covariance = stats["cov"]

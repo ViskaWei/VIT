@@ -33,6 +33,7 @@ import torch.nn.functional as F
 
 from src.utils import load_config
 from src.dataloader.spec_datasets import ClassSpecDataset, RegSpecDataset
+from evals.zca_util import zca_report as compute_zca_report
 
 
 Tensor = torch.Tensor
@@ -119,6 +120,19 @@ def _scaled_outer(U: Tensor, scale: Tensor) -> Tensor:
     return scaled @ U.t()
 
 
+def _symmetrize(mat: Tensor) -> Tensor:
+    return 0.5 * (mat + mat.t())
+
+
+def _shrink_covariance(cov: Tensor, shrinkage: float) -> Tensor:
+    if shrinkage <= 0.0:
+        return cov
+    dim = cov.shape[0]
+    tr_over_dim = torch.trace(cov) / float(dim)
+    eye = torch.eye(dim, dtype=cov.dtype, device=cov.device)
+    return (1.0 - shrinkage) * cov + shrinkage * tr_over_dim * eye
+
+
 def _zca_matrix(
     cov: Tensor,
     eps: float,
@@ -126,19 +140,22 @@ def _zca_matrix(
     rank: Optional[int],
     perp_mode: str,
     perp_scale: Optional[float],
-) -> Tuple[Tensor, Tensor, Tensor]:
-    eigvals, eigvecs = torch.linalg.eigh(cov)
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, Optional[float]]:
+    cov = _symmetrize(cov)
+    cov_hat = _shrink_covariance(cov, shrinkage)
+
+    eigvals, eigvecs = torch.linalg.eigh(cov_hat)
     idx = torch.argsort(eigvals, descending=True)
     eigvals = eigvals[idx]
     eigvecs = eigvecs[:, idx]
-    if shrinkage > 0.0:
-        avg = eigvals.mean()
-        eigvals = (1.0 - shrinkage) * eigvals + shrinkage * avg
-    inv_sqrt = torch.rsqrt(eigvals + eps)
+    cov_used = _scaled_outer(eigvecs, eigvals)
+    eigvals_eps = eigvals + eps
+    inv_sqrt = torch.rsqrt(eigvals_eps)
+    dim = cov.shape[0]
     if rank is None or rank <= 0 or rank >= eigvals.numel():
         matrix = _scaled_outer(eigvecs, inv_sqrt)
-        projector = eigvecs @ eigvecs.t()
-        return matrix, projector, eigvals
+        projector = torch.eye(dim, dtype=cov.dtype, device=cov.device)
+        return matrix, projector, eigvals, cov_used, None
 
     r = int(rank)
     lead = eigvecs[:, :r]
@@ -158,11 +175,12 @@ def _zca_matrix(
         else:
             scale_val = 0.0
 
+    scale_out: Optional[float] = float(scale_val)
     if scale_val != 0.0:
-        eye = torch.eye(cov.shape[0], dtype=cov.dtype, device=cov.device)
+        eye = torch.eye(dim, dtype=cov.dtype, device=cov.device)
         matrix = matrix + scale_val * (eye - projector)
 
-    return matrix, projector, eigvals
+    return matrix, projector, eigvals, cov_used, scale_out
 
 
 def _projector_from_basis(
@@ -259,6 +277,9 @@ def fit_preprocessor(args: argparse.Namespace) -> None:
     if isinstance(rank, int) and rank > dim:
         rank = dim
 
+    cov_used: Optional[Tensor] = None
+    complement_scale: Optional[float] = None
+
     if args.mode == "center":
         matrix = torch.eye(dim, dtype=torch.float64)
     elif args.mode == "standardize":
@@ -266,11 +287,15 @@ def fit_preprocessor(args: argparse.Namespace) -> None:
         inv_std = 1.0 / std
         matrix = torch.diag(inv_std)
     elif args.mode == "zca":
-        matrix, projector, spectrum = _zca_matrix(cov_x, eps, shrinkage, None, args.perp_mode, args.perp_scale)
+        matrix, projector, spectrum, cov_used, complement_scale = _zca_matrix(
+            cov_x, eps, shrinkage, None, args.perp_mode, args.perp_scale
+        )
     elif args.mode == "zca_lowrank":
         if rank is None:
             raise ValueError("--rank is required for zca_lowrank mode")
-        matrix, projector, spectrum = _zca_matrix(cov_x, eps, shrinkage, rank, args.perp_mode, args.perp_scale)
+        matrix, projector, spectrum, cov_used, complement_scale = _zca_matrix(
+            cov_x, eps, shrinkage, rank, args.perp_mode, args.perp_scale
+        )
     elif args.mode == "project_lowrank":
         if rank is None:
             raise ValueError("--rank is required for project_lowrank mode")
@@ -281,7 +306,9 @@ def fit_preprocessor(args: argparse.Namespace) -> None:
         projector = matrix
         spectrum = eigvals[idx]
     elif args.mode == "randrot_white":
-        matrix_zca, projector, spectrum = _zca_matrix(cov_x, eps, shrinkage, None, args.perp_mode, args.perp_scale)
+        matrix_zca, projector, spectrum, cov_used, complement_scale = _zca_matrix(
+            cov_x, eps, shrinkage, None, args.perp_mode, args.perp_scale
+        )
         rotation = _random_rotation(dim, args.seed)
         matrix = matrix_zca @ rotation
     elif args.mode == "randrot":
@@ -322,6 +349,41 @@ def fit_preprocessor(args: argparse.Namespace) -> None:
         raise ValueError(f"Unknown mode '{args.mode}'")
 
     matrix = matrix.to(torch.float64)
+    whiten_metrics: Optional[Dict[str, float]] = None
+    if cov_used is not None:
+        cov_used = cov_used.to(matrix.dtype)
+        target = projector
+        if complement_scale is not None:
+            eye = torch.eye(dim, dtype=matrix.dtype, device=matrix.device)
+            resid = eye - projector
+            target = projector + (complement_scale ** 2) * (resid @ cov_used @ resid)
+        diff = matrix.t() @ cov_used @ matrix - target
+        max_abs = float(diff.abs().max().item())
+        denom = float(target.abs().max().item())
+        rel = max_abs / max(denom, 1e-12)
+        whiten_metrics = {"max_abs": max_abs, "rel_max_abs": rel}
+        print(f"[zca-fit] whitening check: max_abs={max_abs:.3e}, rel={rel:.3e}")
+
+    zca_metrics: Optional[Dict[str, float]] = None
+    if args.mode.startswith("zca"):
+        cov_for_report = cov_used if cov_used is not None else _symmetrize(cov_x)
+        report = compute_zca_report(
+            flux,
+            mean_x,
+            cov_for_report,
+            matrix,
+            float(shrinkage),
+        )
+        zca_metrics = {key: float(value) for key, value in report.items()}
+        print("[zca-fit] ZCA report:")
+        print("sym_err (checking whether cov is symmetric) ~ 0 (e.g. <1e-6)")
+        print("white_err_self (self-consistency of whitening) ~ 0.1 (e.g. <1e-1)")
+        print("white_err_onX (how well whitened X matches identity) should be close to white_err_self")
+        print("cond_Ih (condition number of whitened cov) should be reasonable (e.g. <1e3)")
+        print("off_ratio_P (off-diagonal energy in P) should be small (e.g. <1e-1)")
+        for key, value in zca_metrics.items():
+            print(f"    {key}: {value:.6e}")
+
     bias = _compose_bias(mean_x, matrix)
 
     matrix32 = matrix.to(torch.float32)
@@ -348,6 +410,14 @@ def fit_preprocessor(args: argparse.Namespace) -> None:
         payload["projector"] = projector.to(torch.float32)
     if args.mode in {"randrot", "randrot_white"}:
         payload["rotation"] = matrix32
+    if cov_used is not None:
+        payload["cov_used"] = cov_used.to(torch.float32)
+    if whiten_metrics is not None or zca_metrics is not None:
+        diagnostics = payload.setdefault("diagnostics", {})
+        if whiten_metrics is not None:
+            diagnostics["whitening_error"] = whiten_metrics
+        if zca_metrics is not None:
+            diagnostics["zca_report"] = zca_metrics
     if args.mode in {"pls", "cca"}:
         payload["singular_values"] = spectrum.to(torch.float32)
         payload["cov_xy"] = cov_xy.to(torch.float32)

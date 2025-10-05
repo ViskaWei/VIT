@@ -36,19 +36,34 @@ run_fit() {
     "$@"
 }
 
-run_fit center
-run_fit standardize
+# run_fit center
+# run_fit standardize
 run_fit zca zca --eps "$EPS" --shrinkage "$SHRINKAGE"
-run_fit zca_lowrank zca_lowrank --rank "$RANK" --eps "$EPS" --shrinkage "$SHRINKAGE" --perp-mode avg
-run_fit project_lowrank project_lowrank --rank "$RANK"
-run_fit randrot_white randrot_white --seed "$SEED" --eps "$EPS" --shrinkage "$SHRINKAGE"
-run_fit randrot randrot --seed "$SEED"
-run_fit pca pca --rank "$RANK"
-run_fit pls pls --rank "$RANK"
-run_fit cca cca --rank "$RANK"
+# run_fit zca_lowrank zca_lowrank --rank "$RANK" --eps "$EPS" --shrinkage "$SHRINKAGE" --perp-mode avg
+# run_fit project_lowrank project_lowrank --rank "$RANK"
+# run_fit randrot_white randrot_white --seed "$SEED" --eps "$EPS" --shrinkage "$SHRINKAGE"
+# run_fit randrot randrot --seed "$SEED"
+# run_fit pca pca --rank "$RANK"
+# run_fit pls pls --rank "$RANK"
+# run_fit cca cca --rank "$RANK"
 
 echo
 echo "Ablation stats ready under $STATS_ROOT"
-echo "Launch the sweep with:"
-echo "  python3 scripts/ablation.py --config \"$TRAIN_CONFIG\" --stats-root \"$STATS_ROOT\""
+
+# RUN_ABLATION=${RUN_ABLATION:-1}
+# ABLATION_FLAGS=${ABLATION_FLAGS:-}
+
+# CMD=(
+#   python3 scripts/ablation.py
+#   --config "$TRAIN_CONFIG"
+#   --stats-root "$STATS_ROOT"
+# )
+
+# if (( RUN_ABLATION )); then
+#   echo "Launching ablation sweep: ${CMD[*]} ${ABLATION_FLAGS}"
+#   ${CMD[@]} ${ABLATION_FLAGS}
+# else
+#   echo "Launch the sweep with:"
+#   echo "  ${CMD[*]} ${ABLATION_FLAGS}"
+# fi
 
