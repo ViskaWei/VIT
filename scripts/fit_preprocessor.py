@@ -65,7 +65,13 @@ def _get_label_tensor(dataset, task: str, num_labels: int, limit: Optional[int])
     labels = _ensure_limit(labels, limit)
     if task == "cls":
         labels = labels.reshape(-1).long()
-        return F.one_hot(labels, num_classes=int(num_labels)).to(torch.float64)
+        num_classes = int(num_labels)
+        if labels.numel() == 0:
+            raise RuntimeError("No labels available to compute supervised projector")
+        max_label = int(labels.max().item())
+        if num_classes <= max_label:
+            num_classes = max_label + 1
+        return F.one_hot(labels, num_classes=num_classes).to(torch.float64)
     if labels.dim() == 1:
         labels = labels.unsqueeze(-1)
     return labels.to(torch.float64)

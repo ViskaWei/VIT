@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-CONFIG=${CONFIG:-${CONFIG_DIR:-configs/anyon}/run.yaml}
+CONFIG=${CONFIG:-${CONFIG_DIR:-configs/volta}/run.yaml}
 STATS_ROOT=${STATS_ROOT:-${PCA_DIR:-artifacts/preproc}}
 
 # shellcheck disable=SC2206

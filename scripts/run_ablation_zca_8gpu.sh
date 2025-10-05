@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-CONFIG=${CONFIG:-${CONFIG_DIR:-configs/anyon}/run.yaml}
+CONFIG=${CONFIG:-${CONFIG_DIR:-configs/volta}/run.yaml}
 STATS_ROOT=${STATS_ROOT:-${PCA_DIR:-artifacts/preproc}}
 
 # Default to all 8 GPUs; override by exporting GPU_LIST="0 2 4" etc.
