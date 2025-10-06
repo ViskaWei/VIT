@@ -49,7 +49,7 @@ def _sorted_eigh_sym(cov: Tensor) -> Tuple[Tensor, Tensor]:
     cov_sym = 0.5 * (cov + cov.transpose(-1, -2))
     eigvals, eigvecs = torch.linalg.eigh(cov_sym)
     idx = torch.argsort(eigvals, descending=True)
-    return eigvals[idx], eigvecs[:, idx]
+    return eigvals[idx], eigvecs[:, idx], cov_sym
 
 
 def ensure_covariance(

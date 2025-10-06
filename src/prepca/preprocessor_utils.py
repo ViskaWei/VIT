@@ -45,7 +45,7 @@ def _sorted_eigh_sym(cov: Tensor) -> Tuple[Tensor, Tensor]:
     cov_sym = 0.5 * (cov + cov.t())
     eigvals, eigvecs = torch.linalg.eigh(cov_sym)
     idx = torch.argsort(eigvals, descending=True)
-    return eigvals[idx], eigvecs[:, idx]
+    return eigvals[idx], eigvecs[:, idx], cov_sym
 
 
 def _tensor_num_samples(value: Optional[Tensor]) -> int:
@@ -73,7 +73,7 @@ def load_covariance_stats(cov_path: str | Path) -> CovarianceStats:
     eigvecs = payload["eigvecs"].detach().clone()
     # Ensure eigenpairs exist even if the stored payload predates their inclusion.
     if eigvals.numel() == 0 or eigvecs.numel() == 0:
-        eigvals, eigvecs = _sorted_eigh_sym(cov)
+        eigvals, eigvecs, cov = _sorted_eigh_sym(cov)
     num_samples = _tensor_num_samples(payload.get("num_samples"))
     return CovarianceStats(
         mean=mean,
@@ -243,6 +243,82 @@ def plot_covariance_heatmap(
         warnings.warn(f"Failed to save covariance heatmap at {output_path}: {exc}")
 
 
+def plot_eigenvalue_spectrum(
+    eigvals: Tensor,
+    output_path: Path,
+    num_samples: Optional[int] = None,
+) -> None:
+    """Plot eigenvalue spectrum and remaining variance.
+    
+    Parameters
+    ----------
+    eigvals : Tensor
+        Eigenvalues sorted in descending order
+    output_path : Path
+        Path where plot will be saved
+    num_samples : Optional[int]
+        Number of samples used (for plot title)
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+
+        eigvals_np = eigvals.detach().cpu().numpy()
+        
+        # Create figure with two subplots
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 8))
+        
+        # Plot 1: Normalized eigenvalue spectrum (log-log)
+        eigval_ratio = eigvals / eigvals.sum()
+        eigval_ratio_np = eigval_ratio.detach().cpu().numpy()
+        
+        ax1.plot(np.arange(len(eigval_ratio_np)), eigval_ratio_np, 'o-', 
+                color='k', ms=2, lw=0.8, label='Eigenvalue ratio')
+        ax1.set_xscale('log')
+        ax1.set_yscale('log')
+        ax1.set_ylabel('Eigenvalue Ratio')
+        ax1.set_xlabel('Component Index')
+        ax1.set_title('Eigenvalue Spectrum (Normalized)')
+
+        ax1.grid(True, alpha=0.3)
+        ax1.legend()
+        
+        # Plot 2: Remaining unexplained variance
+        cumsum_ratio = torch.cumsum(eigvals, dim=0) / eigvals.sum()
+        remaining_variance = 1 - cumsum_ratio
+        remaining_np = remaining_variance.detach().cpu().numpy()
+        
+        ax2.plot(remaining_np, 'r-', lw=1.5, label='Remaining variance')
+        ax2.set_yscale('log')
+        ax2.set_ylabel(r'$1 - \sum^i \lambda_j \quad / \quad \sum^N \lambda_j$')
+        ax2.set_xlabel('i-th component')
+        caption = r'The plot shows $1 - \sum^i \lambda_j \; / \; \sum^N \lambda_j$, i.e., the remaining variance not captured by the first $i$ components. Vertical lines indicate the number of components needed to explain'
+
+        # Mark variance thresholds
+        for i in range(1, 4):
+            ratio = 10 ** (-i)
+            idx = torch.argmin(torch.abs(remaining_variance - ratio)).item()
+            explained_pct = 100 - 100 * ratio
+            ax2.axvline(idx, color='b', linestyle='--', alpha=0.7, 
+                       label=f'{explained_pct:.1f}% @ i={idx}')
+            caption += f'{explained_pct:.1f}% @ i={idx} '
+        
+        title_suffix = f' ({num_samples:,} samples)' if num_samples else ''
+        ax2.set_title(f'Remaining Unexplained Variance{title_suffix}')
+        ax2.grid(True, alpha=0.3)
+        ax2.legend(fontsize=9)
+        # ax2.set_xlim(0.1, len(eigvals_np))
+        ax2.text(0.5, -0.2, caption, ha='center', va='top', fontsize=9, transform=ax2.transAxes, wrap=True)
+        ax2.set_xscale('log')
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=200, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Saved eigenvalue spectrum plot at {output_path}")
+    except Exception as exc:
+        warnings.warn(f"Failed to save eigenvalue spectrum at {output_path}: {exc}")
+
+
 def compute_covariance_stats(
     data: Tensor,
     save_path: Optional[Path] = None,
@@ -268,7 +344,7 @@ def compute_covariance_stats(
     mean = data.mean(dim=0, keepdim=False)
     centered = data - mean
     cov = centered.t().matmul(centered) / (centered.shape[0] - 1)
-    eigvals, eigvecs = _sorted_eigh_sym(cov)
+    eigvals, eigvecs, cov = _sorted_eigh_sym(cov)  # Ensure symmetry
     eigvals = eigvals.to(cov.dtype)
     eigvecs = eigvecs.to(cov.dtype)
     
@@ -301,6 +377,10 @@ def compute_covariance_stats(
         # Plot heatmap
         heatmap_path = save_path.with_name(f"{save_path.stem}_heatmap.png")
         plot_covariance_heatmap(cov, heatmap_path, wave=wave)
+        
+        # Plot eigenvalue spectrum
+        eigval_path = save_path.with_name(f"{save_path.stem}_eigenvalues.png")
+        plot_eigenvalue_spectrum(eigvals, eigval_path, num_samples=num_samples)
     
     return stats
 
