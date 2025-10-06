@@ -288,12 +288,12 @@ def plot_eigenvalue_spectrum(
         cumsum_ratio = torch.cumsum(eigvals, dim=0) / eigvals.sum()
         remaining_variance = 1 - cumsum_ratio
         remaining_np = remaining_variance.detach().cpu().numpy()
-        
-        ax2.plot(remaining_np, 'r-', lw=1.5, label='Remaining variance')
+
+        ax2.plot(remaining_np, 'r-', lw=1.5, label='Remaining Var')
         ax2.set_yscale('log')
-        ax2.set_ylabel(r'$1 - \sum^i \lambda_j \quad / \quad \sum^N \lambda_j$')
+        ax2.set_ylabel(r'$1 \;- \; \sum^i \lambda_j \quad / \quad \sum^N \lambda_j$')
         ax2.set_xlabel('i-th component')
-        caption = r'The plot shows $1 - \sum^i \lambda_j \; / \; \sum^N \lambda_j$, i.e., the remaining variance not captured by the first $i$ components. Vertical lines indicate the number of components needed to explain'
+        caption = r'The plot shows $1 - \sum^i \lambda_j \; / \; \sum^N \lambda_j$, i.e., the remaining variance not captured by the first $i$ components. Vertical lines indicate the number of components needed to explain: '
 
         # Mark variance thresholds
         for i in range(1, 4):
@@ -301,8 +301,20 @@ def plot_eigenvalue_spectrum(
             idx = torch.argmin(torch.abs(remaining_variance - ratio)).item()
             explained_pct = 100 - 100 * ratio
             ax2.axvline(idx, color='b', linestyle='--', alpha=0.7, 
-                       label=f'{explained_pct:.1f}% @ i={idx}')
-            caption += f'{explained_pct:.1f}% @ i={idx} '
+                       label=f'i={idx} explained {explained_pct:.1f}%')
+            
+            # Add annotation at intersection point - only show the ratio value
+            y_val = remaining_variance[idx].item()
+            ax2.plot(idx, y_val, 'yo', markersize=6, zorder=5)
+            ax2.annotate(f'({idx}, {ratio})', 
+                        xy=(idx, y_val), 
+                        xytext=(10, 10), 
+                        textcoords='offset points',
+                        fontsize=9,
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7),
+                        arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0', lw=1))
+            
+            caption += f' {explained_pct:.1f}% ({idx}), '
         
         title_suffix = f' ({num_samples:,} samples)' if num_samples else ''
         ax2.set_title(f'Remaining Unexplained Variance{title_suffix}')
