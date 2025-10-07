@@ -18,8 +18,6 @@ import torch
 from scipy import constants
 from torch.utils.data import Dataset
 
-from src.prepca.pipeline import ensure_covariance
-
 
 class Configurable:
     """Mixin that instantiates objects from nested config dictionaries."""
@@ -54,7 +52,6 @@ class BaseDataset(Configurable, Dataset, ABC):
         "root_dir",
         "param",
         "label_norm",
-        "cov_path",
     ]
     config_section = "data"
 
@@ -69,7 +66,6 @@ class BaseDataset(Configurable, Dataset, ABC):
         root_dir: str = "./results",
         param: Optional[str] = None,
         label_norm: Optional[str] = None,
-        cov_path: Optional[str] = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -88,8 +84,6 @@ class BaseDataset(Configurable, Dataset, ABC):
         # Optional label normalization for regression: 'standard'|'zscore'|'minmax'|None
         self.label_norm = (label_norm or "none").lower() if isinstance(label_norm, str) else "none"
         self.test_data_dict: Dict[str, Any] = {}
-        self.cov_path = Path(cov_path) if cov_path else DEFAULT_DATA_DIR / "cov.pt"
-        self.covariance_stats: Optional[Dict[str, torch.Tensor]] = None
 
     def prepare_data(self) -> None:
         """Called only on 1 GPU: prepare the data for training."""
@@ -300,19 +294,8 @@ class BaseSpecDataset(MaskMixin, NoiseMixin, BaseDataset):
         self.num_pixels = len(self.wave)
 
     def _finalize_after_load(self, stage: Optional[str] = None) -> None:
-        self._ensure_covariance(stage)
-
-    def _ensure_covariance(self, stage: Optional[str] = None) -> None:
-        allow_compute = stage in (None, "fit", "train")
-        stats = ensure_covariance(
-            self.flux.detach().cpu().reshape(self.num_samples, -1),
-            self.cov_path,
-            allow_compute=allow_compute,
-            wave=self.wave.detach().cpu(),
-        )
-        self.covariance_stats = stats
-        self.covariance = stats["cov"]
-        self.mean_flux = stats["mean"]
+        # No additional finalization needed
+        pass
 
 
 __all__ = [

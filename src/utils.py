@@ -3,6 +3,89 @@ import os
 import torch
 import numpy as np
 import pandas as pd
+from pathlib import Path
+from typing import Dict, Optional
+
+# ============================================================================
+# Covariance Statistics Loading with Caching
+# ============================================================================
+
+# Global cache for loaded covariance statistics to avoid reloading the same file
+_COV_CACHE: Dict[Path, dict] = {}
+
+
+def load_cov_stats(cov_path: str | Path) -> dict:
+    """Load covariance statistics from .pt file with automatic caching.
+    
+    This function loads covariance statistics once and caches them for subsequent
+    calls. All code should use this function instead of directly calling torch.load.
+    
+    Parameters
+    ----------
+    cov_path : str | Path
+        Path to the covariance statistics file (typically cov.pt)
+        
+    Returns
+    -------
+    dict
+        Dictionary containing at least: 'mean', 'cov', 'eigvals', 'eigvecs'
+        
+    Raises
+    ------
+    FileNotFoundError
+        If the covariance file doesn't exist
+    ValueError
+        If the file doesn't contain required keys
+        
+    Examples
+    --------
+    >>> stats = load_cov_stats("data/pca/cov.pt")
+    >>> mean = stats["mean"]
+    >>> eigvecs = stats["eigvecs"]
+    """
+    path = Path(cov_path).resolve()  # Use absolute path for cache key
+    
+    # Check cache first
+    if path in _COV_CACHE:
+        print(f"[utils] Using cached cov stats from {cov_path}")
+        return _COV_CACHE[path]
+    
+    # Load from disk
+    print(f"[utils] Loading cov stats from {cov_path}")
+    
+    if not path.exists():
+        raise FileNotFoundError(f"Covariance file not found: {path}")
+        
+    stats = torch.load(path, map_location="cpu", weights_only=True)
+    
+    if not isinstance(stats, dict):
+        raise ValueError(f"Expected dict from {cov_path}, got {type(stats)}")
+        
+    required_keys = {"mean", "cov", "eigvals", "eigvecs"}
+    missing = required_keys - set(stats.keys())
+    if missing:
+        raise ValueError(f"Missing required keys in {cov_path}: {missing}")
+    
+    # Cache the loaded stats
+    _COV_CACHE[path] = stats
+    return stats
+
+
+def clear_cov_cache():
+    """Clear the covariance statistics cache."""
+    global _COV_CACHE
+    _COV_CACHE.clear()
+    print("[utils] Covariance cache cleared")
+
+
+def get_cov_cache_size() -> int:
+    """Return the number of cached covariance files."""
+    return len(_COV_CACHE)
+
+
+# ============================================================================
+# Original utility functions below
+# ============================================================================
 
 lick = {
     'TiO_4': [7643.25, 7717.25, 7527.0, 7577.75, 7735.5, 7782.75],

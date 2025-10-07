@@ -6,27 +6,15 @@ from transformers import ViTConfig
 from .attention import PrefilledAttention
 from .preprocessor import LinearPreprocessor, compute_pca_matrix, compute_zca_matrix
 from .specvit import MyViT
+from src.utils import load_cov_stats
 
 __all__ = ["get_model", "get_vit_config"]
-
-
-def _load_cov_stats(cov_path: str) -> dict:
-    """Load covariance statistics from cov.pt file"""
-    stats = torch.load(cov_path, map_location="cpu", weights_only=True)
-    if not isinstance(stats, dict):
-        raise ValueError(f"Expected dict from {cov_path}, got {type(stats)}")
-    required_keys = {"mean", "cov", "eigvals", "eigvecs"}
-    missing = required_keys - set(stats.keys())
-    if missing:
-        raise ValueError(f"Missing required keys in {cov_path}: {missing}")
-    print(f"[builder] Loaded cov stats from {cov_path}")
-    return stats
 
 
 def get_model(config):
     """Build model with optional preprocessor (ZCA/PCA/Attention)"""
     vit_config = get_vit_config(config)
-    warmup_cfg = config.get("warmup", {})
+    warmup_cfg = config.get("warmup", {}) or {}
     loss_name = config.get("loss", {}).get("name", None)
     
     preproc_type = warmup_cfg.get("preprocessor", None)  # "zca", "pca", "attention"
@@ -41,7 +29,7 @@ def get_model(config):
     if cov_path is None:
         raise ValueError(f"preprocessor='{preproc_type}' requires 'cov_path' in warmup config")
     
-    stats = _load_cov_stats(cov_path)
+    stats = load_cov_stats(cov_path)
     eigvecs = stats["eigvecs"]  # (input_dim, input_dim)
     input_dim = eigvecs.shape[0]
     
@@ -69,10 +57,10 @@ def get_model(config):
         preprocessor = LinearPreprocessor(P, freeze=initial_freeze)
         
         if r is not None:
-            model_name = f"ZCA{r}_ViT"
+            model_name = f"ZCA{r}_fz{freeze_epochs}_s{int(shrinkage*10)}_ViT"
             print(f"[builder] Created low-rank ZCA preprocessor with r={r}, eps={eps}, shrinkage={shrinkage}")
         else:
-            model_name = "ZCA_ViT"
+            model_name = f"ZCA_fz{freeze_epochs}_s{int(shrinkage*10)}_ViT"
             print(f"[builder] Created full-rank ZCA preprocessor with eps={eps}, shrinkage={shrinkage}")
         
     elif preproc_type == "pca":
@@ -82,14 +70,14 @@ def get_model(config):
             raise ValueError("preprocessor='pca' requires 'r' in warmup config")
         P = compute_pca_matrix(eigvecs, r=r)
         preprocessor = LinearPreprocessor(P, freeze=initial_freeze)
-        model_name = f"PCA{r}_ViT"
+        model_name = f"PCA{r}_fz{freeze_epochs}_ViT"
         print(f"[builder] Created PCA preprocessor with r={r}")
         
     elif preproc_type == "attention":
         # Global attention with Q, K initialized from eigenvectors
         r = warmup_cfg.get("r", None)
         preprocessor = PrefilledAttention(input_dim=input_dim, eigvecs=eigvecs, r=r)
-        model_name = f"Attn{r if r else 'Full'}_ViT"
+        model_name = f"Attn{r if r else 'Full'}_fz{freeze_epochs}_ViT"
         print(f"[builder] Created Attention preprocessor with r={r}")
         
     else:

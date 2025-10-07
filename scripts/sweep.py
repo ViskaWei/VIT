@@ -6,6 +6,8 @@ from src.vit import Experiment
 
 os.environ['WANDB_ENTITY'] = 'viskawei-johns-hopkins-university'
 os.environ['VIT_PROJECT'] = 'vit-test'
+# Set CONFIG_DIR if not already set
+os.environ.setdefault('CONFIG_DIR', os.path.join(os.path.dirname(os.path.dirname(__file__)), 'configs'))
 # Reduce CPU thread oversubscription when running many agents
 os.environ.setdefault('OMP_NUM_THREADS', '1')
 os.environ.setdefault('MKL_NUM_THREADS', '1')
@@ -19,6 +21,8 @@ def train_fn(args=None):
         or arg_cfg
         or os.environ.get('VIT_CONFIG', 'configs/vit.yaml')
     )
+    # Expand environment variables in the config path (e.g., ${CONFIG_DIR})
+    cfg_path = os.path.expandvars(cfg_path)
     config = load_config(cfg_path)
 
     # Helper: deep-set using dotted keys, e.g., 'warmup.r', 'model.proj_fn'

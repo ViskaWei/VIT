@@ -8,13 +8,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple, Dict
 import warnings
 
 import numpy as np
 import torch
 
 from evals.zca_util import zca_report as compute_zca_report
+from src.utils import load_cov_stats as load_cov_stats_base
 
 Tensor = torch.Tensor
 
@@ -41,7 +42,7 @@ class CovarianceStats:
         )
 
 
-def _sorted_eigh_sym(cov: Tensor) -> Tuple[Tensor, Tensor]:
+def _sorted_eigh_sym(cov: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
     cov_sym = 0.5 * (cov + cov.t())
     eigvals, eigvecs = torch.linalg.eigh(cov_sym)
     idx = torch.argsort(eigvals, descending=True)
@@ -57,24 +58,28 @@ def _tensor_num_samples(value: Optional[Tensor]) -> int:
 
 
 def load_covariance_stats(cov_path: str | Path) -> CovarianceStats:
-    path = Path(cov_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Covariance file not found: {path}")
-    payload = torch.load(path, map_location="cpu")
-    if not isinstance(payload, dict):
-        raise ValueError(f"Covariance payload at {path} is not a dictionary")
-    required = {"mean", "cov", "eigvals", "eigvecs"}
-    missing = sorted(required.difference(payload))
-    if missing:
-        raise KeyError(f"Covariance payload at {path} missing keys: {missing}")
-    mean = payload["mean"].detach().clone()
-    cov = payload["cov"].detach().clone()
-    eigvals = payload["eigvals"].detach().clone()
-    eigvecs = payload["eigvecs"].detach().clone()
+    """Load covariance statistics and wrap them in CovarianceStats dataclass.
+    
+    This function now uses the unified load_cov_stats from src.utils for caching,
+    then wraps the result in a CovarianceStats object for type safety.
+    """
+    path = Path(cov_path).resolve()
+    
+    # Use the unified loading function from src.utils (with shared caching)
+    stats_dict = load_cov_stats_base(cov_path)
+    
+    # Wrap in CovarianceStats dataclass
+    mean = stats_dict["mean"].detach().clone()
+    cov = stats_dict["cov"].detach().clone()
+    eigvals = stats_dict["eigvals"].detach().clone()
+    eigvecs = stats_dict["eigvecs"].detach().clone()
+    
     # Ensure eigenpairs exist even if the stored payload predates their inclusion.
     if eigvals.numel() == 0 or eigvecs.numel() == 0:
         eigvals, eigvecs, cov = _sorted_eigh_sym(cov)
-    num_samples = _tensor_num_samples(payload.get("num_samples"))
+    
+    num_samples = _tensor_num_samples(stats_dict.get("num_samples"))
+    
     return CovarianceStats(
         mean=mean,
         cov=cov,
@@ -83,6 +88,7 @@ def load_covariance_stats(cov_path: str | Path) -> CovarianceStats:
         eigvecs=eigvecs,
         source_path=path,
     )
+    return stats
 
 
 def ensure_covariance_stats(
@@ -442,7 +448,7 @@ def load_or_compute_covariance(
     if cov_path is not None:
         cov_path = Path(cov_path)
         if cov_path.exists():
-            print(f"Loading covariance statistics from {cov_path}")
+            # Don't print here - let load_covariance_stats handle the message
             return load_covariance_stats(cov_path)
     
     # If we reach here, we need to compute
