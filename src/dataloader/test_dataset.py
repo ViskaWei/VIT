@@ -40,9 +40,16 @@ class TestDataset(BaseSpecDataset):
             self.labels = torch.randint(0, 2, (spectra.shape[0],)).long()
         self.num_samples = self.flux.shape[0]
         self._finalize_after_load(stage)
+        # Pre-generate noisy data for validation/test with fixed seed (like blindspot.py)
+        if stage in ('val', 'test', 'validate'):
+            self._set_noise()
 
     def __getitem__(self, idx):
-        return self.flux[idx], self.error[idx], self.labels[idx]
+        # For val/test, return pre-generated noisy; for train, return flux
+        if self.noisy is not None:
+            return self.noisy[idx], self.flux[idx], self.error[idx], self.labels[idx]
+        else:
+            return self.flux[idx], self.error[idx], self.labels[idx]
 
 
 __all__ = ["TestDataset"]

@@ -14,7 +14,7 @@ def compute_zca_matrix(
     eigvals: torch.Tensor,
     eps: float = 1e-5,
     r: int | None = None,
-    shrinkage: float = 0.0,
+    shrinkage: float = 0.1,
 ) -> torch.Tensor:
     """Compute ZCA whitening matrix P = V @ D^(-1/2) @ V.T
     
@@ -38,15 +38,38 @@ def compute_zca_matrix(
         D_inv_sqrt = torch.diag(1.0 / torch.sqrt(eigvals_hat + eps))
         P = eigvecs @ D_inv_sqrt @ eigvecs.t()
     else:
-        # Low-rank ZCA: P = (Vr * inv_sqrt_r) @ Vr.T
+        # Low-rank ZCA + avg: P = (Vr * inv_sqrt_r) @ Vr.T + s_perp * (I - proj)
+        # This avoids inflating near-zero tail, preserves pixel-space geometry,
+        # and yields near-identity whitening in the signal subspace with well-conditioned global scaling
         if shrinkage > 0.0:
             avg = eigvals.mean()
             eigvals_hat = (1.0 - shrinkage) * eigvals + shrinkage * avg
         else:
             eigvals_hat = eigvals
+        
         Vr = eigvecs[:, :r]
         inv_sqrt_r = torch.rsqrt(eigvals_hat[:r] + eps)
-        P = (Vr * inv_sqrt_r) @ Vr.t()
+        
+        # Compute tail representative (median of tail eigenvalues)
+        tail = eigvals_hat[r:]
+        if tail.numel() > 0:
+            lam0 = tail.median()
+        else:
+            lam0 = eigvals_hat[r-1]
+        
+        # Apply floor to avoid numerical issues
+        floor_rel = 1e-3
+        lam0_floor = floor_rel * eigvals_hat[:r].mean()
+        lam0 = torch.clamp(lam0, min=lam0_floor)
+        
+        # Compute perpendicular space scaling
+        s_perp = 1.0 / torch.sqrt(lam0 + eps)
+        
+        # Build low-rank ZCA + avg in perpendicular space
+        D = eigvecs.shape[0]
+        proj = Vr @ Vr.t()
+        I = torch.eye(D, dtype=eigvecs.dtype, device=eigvecs.device)
+        P = (Vr * inv_sqrt_r) @ Vr.t() + s_perp * (I - proj)
     
     return P
 

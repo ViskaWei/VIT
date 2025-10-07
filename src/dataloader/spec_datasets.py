@@ -21,10 +21,17 @@ class ClassSpecDataset(BaseSpecDataset):
         super().load_data(stage)
         self.load_params(stage)
         self.labels = (torch.tensor(self.logg > 2.5)).long()
+        # Pre-generate noisy data for validation/test with fixed seed (like blindspot.py)
+        if stage in ('val', 'test', 'validate'):
+            self._set_noise()
 
     def __getitem__(self, idx):
         flux, error = super().__getitem__(idx)
-        return flux, error, self.labels[idx]
+        # For val/test, return pre-generated noisy; for train, return flux
+        if self.noisy is not None:
+            return self.noisy[idx], flux, error, self.labels[idx]
+        else:
+            return flux, error, self.labels[idx]
 
 
 class RegSpecDataset(BaseSpecDataset):
@@ -51,10 +58,17 @@ class RegSpecDataset(BaseSpecDataset):
             )
         self.labels = torch.tensor(self.param_values).float()
         self._maybe_normalize_labels(stage)
+        # Pre-generate noisy data for validation/test with fixed seed (like blindspot.py)
+        if stage in ('val', 'test', 'validate'):
+            self._set_noise()
 
     def __getitem__(self, idx):
         flux, error = super().__getitem__(idx)
-        return flux, error, self.labels[idx]
+        # For val/test, return pre-generated noisy; for train, return flux
+        if self.noisy is not None:
+            return self.noisy[idx], flux, error, self.labels[idx]
+        else:
+            return flux, error, self.labels[idx]
 
     def _maybe_normalize_labels(self, stage=None, kind=None, eps=1e-8):
         kind = getattr(self, "label_norm", "none")

@@ -192,6 +192,10 @@ class SingleSpectrumNoiseDataset(Dataset):
 
 
 class BaseSpecDataset(MaskMixin, NoiseMixin, BaseDataset):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.noisy = None  # Pre-generated noisy data for val/test (like blindspot.py)
+
     def get_path_and_samples(self, stage: Optional[str]):
         if stage in {"fit", "train", None}:
             return self.file_path, self.num_samples
@@ -296,6 +300,22 @@ class BaseSpecDataset(MaskMixin, NoiseMixin, BaseDataset):
     def _finalize_after_load(self, stage: Optional[str] = None) -> None:
         # No additional finalization needed
         pass
+
+    def _set_noise(self, seed: int = 42) -> None:
+        """Pre-generate noisy data with fixed seed for reproducible validation/test.
+        
+        This method is called automatically for val/test stages in subclasses.
+        Based on blindspot.py implementation for consistent noise generation.
+        
+        Args:
+            seed: Random seed for reproducibility (default: 42)
+        """
+        if self.noise_level > 0:
+            torch.manual_seed(seed)
+            noise = torch.randn_like(self.flux) * self.error * self.noise_level
+            self.noisy = self.flux + noise
+        else:
+            self.noisy = None
 
 
 __all__ = [

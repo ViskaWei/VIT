@@ -1,4 +1,5 @@
 import os
+import torch
 from torchmetrics import Accuracy, MeanAbsoluteError, MeanSquaredError, R2Score
 import lightning as L
 
@@ -60,6 +61,8 @@ class ViTLModule(BaseLightningModule):
         super().__init__(model=model, config=config)
         self.save_hyperparameters(ignore=['model'])
         self.task_type = _normalize_task(config)
+        # Get noise_level from config, similar to blindspot.py
+        self.noise_level = config.get('noise', {}).get('noise_level', 0.0)
         if self.task_type == 'cls':
             self.accuracy = Accuracy(task='multiclass', num_classes=config['model']['num_labels'])
         elif self.task_type == 'reg':
@@ -72,18 +75,37 @@ class ViTLModule(BaseLightningModule):
 
     def forward(self, flux, labels, loss_only=True):
         """Forward wrapper returning loss or full outputs from HF model."""
-        outputs = self.model(flux,labels=labels)
+        outputs = self.model(flux, labels=labels)
         return outputs.loss if loss_only else outputs
         
     def training_step(self, batch, batch_idx):
-        flux, _, labels = batch
-        loss = self.forward(flux, labels, loss_only=True)
+        # Training: batch is (flux, error, labels) - generate noise on the fly
+        flux, error, labels = batch
+        if self.noise_level > 0:
+            noisy = flux + torch.randn_like(flux) * error * self.noise_level
+            loss = self(noisy, labels, loss_only=True)
+        else:
+            loss = self(flux, labels, loss_only=True)
         self.log(f'{self.loss_name}_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
     
     def _shared_eval_step(self, batch, prefix):
-        flux, _, labels = batch
-        outputs = self.forward(flux, labels, loss_only=False)
+        # Val/Test: batch can be (noisy, flux, error, labels) with pre-generated noise
+        # or (flux, error, labels) without noise
+        if len(batch) == 4:
+            # Pre-generated noisy data from dataset (like blindspot.py)
+            noisy, flux, error, labels = batch
+            if self.noise_level > 0:
+                # Use pre-generated noisy data
+                outputs = self.forward(noisy, labels, loss_only=False)
+            else:
+                # noise_level is 0, use clean flux
+                outputs = self.forward(flux, labels, loss_only=False)
+        else:
+            # No pre-generated noise (fallback or training dataset reused)
+            flux, error, labels = batch
+            outputs = self.forward(flux, labels, loss_only=False)
+        
         loss = outputs.loss
         self.log(f'{prefix}_{self.loss_name}_loss', loss, on_step=False, on_epoch=True)
         if self.task_type == 'cls':
@@ -184,9 +206,12 @@ class SpecTrainer():
         self.trainer = BaseTrainer(config=config.get('train', {}), logger=logger, num_gpus=num_gpus, sweep=sweep)
         
         # Add preprocessor freeze callback if configured
+        # freeze_epochs > 0: freeze for N epochs then unfreeze
+        # freeze_epochs = -1: permanently frozen
+        # freeze_epochs = 0: never frozen (no callback needed)
         warmup_cfg = config.get('warmup') or {}
         freeze_epochs = warmup_cfg.get('freeze_epochs', 0)
-        if freeze_epochs > 0:
+        if freeze_epochs != 0:  # Add callback if not 0 (either temporary or permanent freeze)
             self.trainer.callbacks.append(PreprocessorFreezeCallback(freeze_epochs=freeze_epochs))
         
         # p = (config.get('pca') or {})

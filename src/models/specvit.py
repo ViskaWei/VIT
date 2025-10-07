@@ -8,6 +8,7 @@ from src.basemodule import BaseModel
 
 from .embedding import SpectraEmbeddings
 from .model_utils import build_model_name
+from .vit_with_rope import ViTSelfAttentionWithRoPE
 
 
 __all__ = ["MyViT"]
@@ -28,7 +29,15 @@ class MyViT(ViTPreTrainedModel, BaseModel):
         ViTPreTrainedModel.__init__(self, config)
         self.config = config
         self.vit = ViTModel(config)
+        
+        # Replace embeddings with custom SpectraEmbeddings
         self.vit.embeddings = SpectraEmbeddings(config)
+        
+        # If using RoPE, replace attention layers with RoPE-enabled versions
+        pos_encoding_type = getattr(config, "pos_encoding_type", None)
+        if pos_encoding_type == "rope":
+            self._replace_attention_with_rope(config)
+        
         self.preprocessor = preprocessor
         
         # Setup task-specific head and loss
@@ -48,6 +57,12 @@ class MyViT(ViTPreTrainedModel, BaseModel):
         
         self._model_name = build_model_name(config, model_name)
         self._loss_name = loss_name
+    
+    def _replace_attention_with_rope(self, config: ViTConfig) -> None:
+        """Replace standard ViT attention layers with RoPE-enabled versions."""
+        for layer in self.vit.encoder.layer:
+            # Replace the self-attention module
+            layer.attention.attention = ViTSelfAttentionWithRoPE(config, use_rope=True)
 
     def forward(self, pixel_values, labels=None, output_attentions=None, output_hidden_states=None, return_dict=None):
         return_dict = return_dict or self.config.use_return_dict

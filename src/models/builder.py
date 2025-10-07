@@ -11,6 +11,35 @@ from src.utils import load_cov_stats
 __all__ = ["get_model", "get_vit_config"]
 
 
+def _get_freeze_suffix(freeze_epochs: int) -> str:
+    """Get model name suffix for freeze status.
+    
+    Args:
+        freeze_epochs: Freeze configuration
+            > 0: temporary freeze for N epochs
+            = -1: permanent freeze
+            = 0: never frozen
+    
+    Returns:
+        Suffix string: "perm" for permanent, number for temporary, "0" for never
+    """
+    return "perm" if freeze_epochs == -1 else str(freeze_epochs)
+
+
+def _log_freeze_status(freeze_epochs: int) -> None:
+    """Log preprocessor freeze status.
+    
+    Args:
+        freeze_epochs: Freeze configuration
+    """
+    if freeze_epochs == -1:
+        print("[builder] Preprocessor will be PERMANENTLY FROZEN (never trained)")
+    elif freeze_epochs > 0:
+        print(f"[builder] Preprocessor will be frozen for first {freeze_epochs} epochs")
+    else:
+        print("[builder] Preprocessor is trainable from start")
+
+
 def get_model(config):
     """Build model with optional preprocessor (ZCA/PCA/Attention)"""
     vit_config = get_vit_config(config)
@@ -39,9 +68,10 @@ def get_model(config):
             f"Mismatch: eigvecs dimension {input_dim} != image_size {vit_config.image_size}"
         )
     
-    # Determine initial freeze state (frozen if freeze_epochs > 0)
+    # Determine initial freeze state
     freeze_epochs = warmup_cfg.get("freeze_epochs", 0)
-    initial_freeze = freeze_epochs > 0
+    initial_freeze = freeze_epochs != 0  # Frozen if != 0 (either temporary or permanent)
+    fz_suffix = _get_freeze_suffix(freeze_epochs)
     
     preprocessor = None
     model_name = "ViT"
@@ -57,38 +87,46 @@ def get_model(config):
         P = compute_zca_matrix(eigvecs, eigvals, eps=eps, r=r, shrinkage=shrinkage)
         preprocessor = LinearPreprocessor(P, freeze=initial_freeze)
         
-        if r is not None:
-            model_name = f"ZCA{r}_fz{freeze_epochs}_s{int(shrinkage*10)}_ViT"
-            print(f"[builder] Created low-rank ZCA preprocessor with r={r}, eps={eps}, shrinkage={shrinkage}")
-        else:
-            model_name = f"ZCA_fz{freeze_epochs}_s{int(shrinkage*10)}_ViT"
-            print(f"[builder] Created full-rank ZCA preprocessor with eps={eps}, shrinkage={shrinkage}")
+        # Model name
+        rank_str = f"ZCA{r}" if r is not None else "ZCA"
+        shrink_str = f"_s{int(shrinkage*10)}"
+        model_name = f"{rank_str}_fz{fz_suffix}{shrink_str}_ViT"
+        
+        # Log
+        rank_desc = f"low-rank ZCA with r={r}" if r else "full-rank ZCA"
+        print(f"[builder] Created {rank_desc}, eps={eps}, shrinkage={shrinkage}")
         
     elif preproc_type == "pca":
         # PCA projection: V[:, :r].T @ x (low-rank or full-rank)
         r = warmup_cfg.get("r", None)
         P = compute_pca_matrix(eigvecs, r=r)
         preprocessor = LinearPreprocessor(P, freeze=initial_freeze)
-        if r is not None:
-            model_name = f"PCA{r}_fz{freeze_epochs}_ViT"
-            print(f"[builder] Created PCA preprocessor with r={r}")
-        else:
-            model_name = f"PCA_fz{freeze_epochs}_ViT"
-            print(f"[builder] Created full-rank PCA preprocessor")
+        
+        # Model name
+        rank_str = f"PCA{r}" if r is not None else "PCA"
+        model_name = f"{rank_str}_fz{fz_suffix}_ViT"
+        
+        # Log
+        rank_desc = f"PCA with r={r}" if r else "full-rank PCA"
+        print(f"[builder] Created {rank_desc} preprocessor")
         
     elif preproc_type == "attention":
         # Global attention with Q, K initialized from eigenvectors
         r = warmup_cfg.get("r", None)
         preprocessor = PrefilledAttention(input_dim=input_dim, eigvecs=eigvecs, r=r)
-        model_name = f"Attn{r if r else 'Full'}_fz{freeze_epochs}_ViT"
+        
+        # Model name
+        rank_str = r if r else "Full"
+        model_name = f"Attn{rank_str}_fz{fz_suffix}_ViT"
+        
+        # Log
         print(f"[builder] Created Attention preprocessor with r={r}")
         
     else:
         raise ValueError(f"Unknown preprocessor type: '{preproc_type}'")
     
     # Log freeze status
-    if freeze_epochs > 0:
-        print(f"[builder] Preprocessor will be frozen for first {freeze_epochs} epochs")
+    _log_freeze_status(freeze_epochs)
     
     model = MyViT(
         vit_config,
@@ -117,6 +155,11 @@ def get_vit_config(config):
         elif isinstance(p, (list, tuple)) and len(p) > 0:
             num_labels = len(p)
         m["num_labels"] = num_labels
+    
+    # Position encoding configuration (default: None - no position encoding)
+    pos_encoding_type = m.get("pos_encoding_type", None)
+    max_position_embeddings = m.get("max_position_embeddings", 512)
+    rope_base = m.get("rope_base", 10000.0)
 
     return ViTConfig(
         task_type=m["task_type"],
@@ -139,4 +182,7 @@ def get_vit_config(config):
         use_mask_token=False,
         qkv_bias=True,
         num_labels=num_labels,
+        pos_encoding_type=pos_encoding_type,
+        max_position_embeddings=max_position_embeddings,
+        rope_base=rope_base,
     )
