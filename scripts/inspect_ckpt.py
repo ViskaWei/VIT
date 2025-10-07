@@ -103,7 +103,6 @@ def save_activations(acts: OrderedDict, out_dir: str, batch_idx: int, model_out=
     - logits, loss: from model outputs (if available)
     - hidden_states, attentions: from model outputs (if available)
     """
-
     def to_cpu(obj):
         if isinstance(obj, torch.Tensor):
             return _safe_tensor_to_cpu(obj)
@@ -159,26 +158,29 @@ def _resolve_ckpt(args, config):
         local_art_dir = os.path.join('artifacts', f"model-{args.wandb_id}:{version}")
         local_ckpt = os.path.join(local_art_dir, 'model.ckpt')
         if os.path.isfile(local_ckpt):
-            print(f"Found local W&B artifact checkpoint: {local_ckpt}")
+            print(f"✓ Using cached checkpoint: {local_ckpt}")
             return local_ckpt
 
         try:
             import wandb
-        except Exception as e:
-            raise RuntimeError("wandb is required to download artifacts. Please `pip install wandb`. ") from e
+        except ImportError as e:
+            raise RuntimeError("wandb is required to download artifacts. Install with: pip install wandb") from e
 
         entity = args.entity or os.environ.get('WANDB_ENTITY') or 'viskawei-johns-hopkins-university'
         project = args.project or (config.get('project') if isinstance(config, dict) else None) or 'vit-test'
         artifact_type = args.artifact_type or 'model'
 
+        print(f"⬇ Downloading from W&B: {entity}/{project}/model-{args.wandb_id}:{version}")
         run = wandb.init(entity=entity, project=project, job_type='download')
         path = f"{entity}/{project}/model-{args.wandb_id}:{version}"
         art = run.use_artifact(path, type=artifact_type)
         a_dir = art.download()
+        wandb.finish()
+        
         ckpt = os.path.join(a_dir, 'model.ckpt')
         if not os.path.isfile(ckpt):
             raise FileNotFoundError(f"Downloaded artifact missing model.ckpt at: {ckpt}")
-        print(f"Downloaded checkpoint from W&B: {ckpt}")
+        print(f"✓ Downloaded to: {ckpt}")
         return ckpt
 
     raise ValueError("Must provide either --ckpt or --wandb-id to locate a checkpoint.")
@@ -219,20 +221,28 @@ def main():
     ckpt_base = os.path.splitext(os.path.basename(ckpt_path))[0]
     out_dir = args.out or os.path.join("results", "inspect", f"{ckpt_base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     os.makedirs(out_dir, exist_ok=True)
+    print(f"Output directory: {out_dir}")
 
     # Save parameter stats (JSON) and optionally full tensors
-    os.makedirs(os.path.join(out_dir, "params"), exist_ok=True)
+    params_dir = os.path.join(out_dir, "params")
+    os.makedirs(params_dir, exist_ok=True)
     param_stats = collect_param_stats(lm.model)
-    with open(os.path.join(out_dir, "params", "stats.json"), "w") as f:
+    with open(os.path.join(params_dir, "stats.json"), "w") as f:
         json.dump(param_stats, f, indent=2)
+    print(f"✓ Saved parameter statistics to: {params_dir}/stats.json")
 
     if args.save_full_param_tensors:
+        print(f"💾 Saving full parameter tensors...")
+        saved_count = 0
         for name, p in lm.model.named_parameters():
             try:
-                path = os.path.join(out_dir, "params", f"{name.replace('.', '_')}.pt")
+                safe_name = name.replace('.', '_')
+                path = os.path.join(params_dir, f"{safe_name}.pt")
                 torch.save(p.detach().to("cpu"), path)
-            except Exception:
-                pass
+                saved_count += 1
+            except Exception as e:
+                print(f"  Warning: Could not save {name}: {e}")
+        print(f"✓ Saved {saved_count} parameter tensors")
 
     # Patch-embedding params will be saved along with all others
     # when --save-full-param-tensors is provided via named_parameters().
@@ -241,6 +251,7 @@ def main():
     acts, handles = register_activation_hooks(lm.model)
 
     # Run on test batches and save activations + model outputs
+    print(f"🔍 Capturing activations from {args.max_batches} test batches...")
     with torch.no_grad():
         for bi, batch in enumerate(test_loader):
             if bi >= args.max_batches:
@@ -262,12 +273,18 @@ def main():
 
             # Save consolidated activations + outputs in one file
             save_activations(acts, out_dir, bi, model_out=out)
+        print(f"✓ Saved activations for {bi + 1} batches")
 
     # Remove hooks
     for h in handles:
         h.remove()
 
-    print(f"Inspection artifacts saved to: {out_dir}")
+    print("=" * 60)
+    print(f"✓ Inspection complete!")
+    print(f"  Output: {out_dir}")
+    print(f"  Parameters: {params_dir}")
+    print(f"  Batches: {bi + 1}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

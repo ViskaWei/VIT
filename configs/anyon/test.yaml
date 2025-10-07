@@ -1,11 +1,14 @@
 warmup:
+  preprocessor: pca
+  cov_path: ${PCA_DIR}/cov.pt
+  
   # embed: true
   # embed_pca_path: pca_patch_32_s32.pt
-  global: true
-  global_pca_path: ${PCA_DIR}/pca_4096.pt   # could be a tensor U or dict with {'U', 'S', 'explained_variance_ratio'}
+  # global: true
+  # global_pca_path: ${PCA_DIR}/pca_4096.pt   # could be a tensor U or dict with {'U', 'S', 'explained_variance_ratio'}
   # Load PCA mean vector as input bias for global warmup (mean shape must match D=image_size)
-  bias: true
-  UV: V
+  # bias: true
+  # UV: V
   # r: 128     # Low-rank dimension for Q/K/V (try 128 or 64)
   # freeze_qk_epochs: 5
   # lora: true  # if true, use low-rank (D->r->D) projections for Q/K/V

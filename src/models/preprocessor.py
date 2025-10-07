@@ -51,16 +51,19 @@ def compute_zca_matrix(
     return P
 
 
-def compute_pca_matrix(eigvecs: torch.Tensor, r: int) -> torch.Tensor:
+def compute_pca_matrix(eigvecs: torch.Tensor, r: int | None = None) -> torch.Tensor:
     """Compute PCA projection matrix P = V[:, :r].T
     
     Args:
         eigvecs: Eigenvectors (D, D) sorted by eigenvalues descending
-        r: Number of components to keep
+        r: Number of components to keep. If None, use full rank (all components)
     
     Returns:
-        PCA matrix P of shape (r, D)
+        PCA matrix P of shape (r, D) for low-rank or (D, D) for full-rank
     """
+    if r is None:
+        # Full-rank PCA: use all eigenvectors
+        return eigvecs.t()
     return eigvecs[:, :r].t()
 
 

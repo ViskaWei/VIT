@@ -1,7 +1,9 @@
 warmup:
-  embed: true
-  embed_pca_path: pca_patch_32_s32.pt
-  global: false
+  preprocessor: zca     
+  cov_path: ${PCA_DIR}/cov.pt
+  # embed: true
+  # embed_pca_path: pca_patch_32_s32.pt
+  # global: false
   # global_pca_path: ${PCA_DIR}/pca_4096.pt   # could be a tensor U or dict with {'U', 'S', 'explained_variance_ratio'}
   # r: 128      # Low-rank dimension for Q/K/V (try 128 or 64)
   # freeze_qk_epochs: 5
@@ -21,7 +23,7 @@ warmup:
 model:
   name: vit
   task_type: reg
-  num_labels: 1
+  num_labels: 3
   image_size: 4096    
   patch_size: 32
   hidden_size: 32
@@ -35,15 +37,15 @@ train:
   ep: 1
   debug: 0
   workers: 10
-  save: true
+  save: false
   # precision: '16-mixed'   # uncomment to reduce memory further
 
 loss: 
   name: 'l1'
 
 opt:
-  type: 'adam'
-  lr: 0.001
+  type: 'AdamW'
+  lr: 0.1
   lr_sch: plateau
   factor: 0.8
   patience: 2
@@ -59,13 +61,11 @@ data:
   # test_path: '/datascope/subaru/user/swei20/data/bosz50000/mag215/val_1k/dataset.h5'
   num_samples: 100
   num_test_samples: 100
+  # param: T_eff
   param: T_eff, log_g, fe_h
   label_norm: 'minmax' # 'standard', 'minmax', 'zscore', or 'none'
-
-mask:
-  mask_ratio: 0.85
 
 noise:
   noise_level: 0
 
-project: 'vit-test0'
+project: 'vit-test'

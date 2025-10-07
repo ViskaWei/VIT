@@ -64,14 +64,16 @@ def get_model(config):
             print(f"[builder] Created full-rank ZCA preprocessor with eps={eps}, shrinkage={shrinkage}")
         
     elif preproc_type == "pca":
-        # PCA projection: V[:, :r].T @ x (low-rank)
+        # PCA projection: V[:, :r].T @ x (low-rank or full-rank)
         r = warmup_cfg.get("r", None)
-        if r is None:
-            raise ValueError("preprocessor='pca' requires 'r' in warmup config")
         P = compute_pca_matrix(eigvecs, r=r)
         preprocessor = LinearPreprocessor(P, freeze=initial_freeze)
-        model_name = f"PCA{r}_fz{freeze_epochs}_ViT"
-        print(f"[builder] Created PCA preprocessor with r={r}")
+        if r is not None:
+            model_name = f"PCA{r}_fz{freeze_epochs}_ViT"
+            print(f"[builder] Created PCA preprocessor with r={r}")
+        else:
+            model_name = f"PCA_fz{freeze_epochs}_ViT"
+            print(f"[builder] Created full-rank PCA preprocessor")
         
     elif preproc_type == "attention":
         # Global attention with Q, K initialized from eigenvectors
