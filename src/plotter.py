@@ -1,4 +1,5 @@
 #region --PLOT-----------------------------------------------------------
+import os
 import numpy as np
 import seaborn as sns
 from scipy.stats import gaussian_kde, skew
@@ -260,3 +261,352 @@ class SpecPlotter():
         SpecPlotter.add_stats_text(ax, data, label=label)
         ax.text(0.05, 0.95, index_name, transform=plt.gca().transAxes, ha='left', va='top', fontsize=12)
         ax.text(0.05, 0.85, bin_label, transform=plt.gca().transAxes, ha='left', va='top', fontsize=12)
+
+
+#region --REGRESSION PLOTTER-----------------------------------------------------------
+class RegressionPlotter:
+    """
+    Comprehensive plotter for regression model evaluation.
+    Supports multi-output regression (e.g., Teff, log_g, M_H).
+    """
+    
+    def __init__(self, predictions, labels, param_names=None, logger=None, save_dir='./results/test_plots'):
+        """
+        Args:
+            predictions: np.ndarray of shape (n_samples,) or (n_samples, n_outputs)
+            labels: np.ndarray of shape (n_samples,) or (n_samples, n_outputs)
+            param_names: List of parameter names (e.g., ['Teff', 'log_g', 'M_H'])
+            logger: Optional W&B logger
+            save_dir: Directory to save plots
+        """
+        import os
+        self.predictions = np.asarray(predictions)
+        self.labels = np.asarray(labels)
+        self.logger = logger
+        self.save_dir = save_dir
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Determine if multi-output
+        self.is_multi_output = len(self.predictions.shape) > 1 and self.predictions.shape[1] > 1
+        
+        if self.is_multi_output:
+            self.n_outputs = self.predictions.shape[1]
+            self.param_names = param_names or ['Teff', 'log_g', 'M_H'][:self.n_outputs]
+        else:
+            self.n_outputs = 1
+            self.param_names = param_names or ['Parameter']
+            # Ensure predictions and labels are 2D for consistency
+            if len(self.predictions.shape) == 1:
+                self.predictions = self.predictions.reshape(-1, 1)
+                self.labels = self.labels.reshape(-1, 1)
+    
+    def _save_and_log(self, fig, name):
+        """Save figure locally and log to W&B if available"""
+        # Save locally
+        filename = name.replace('/', '_').replace('\\', '_') + '.png'
+        filepath = os.path.join(self.save_dir, filename)
+        try:
+            fig.savefig(filepath, dpi=150, bbox_inches='tight')
+            print(f"Saved plot: {filepath}")
+        except Exception as e:
+            print(f"Warning: Could not save figure {filename}: {e}")
+        
+        # Log to W&B
+        if self.logger and hasattr(self.logger, 'experiment'):
+            try:
+                import wandb
+                self.logger.experiment.log({name: wandb.Image(fig)})
+            except Exception as e:
+                print(f"Warning: Could not log figure to W&B: {e}")
+        
+        return fig
+    
+    def plot_predictions_vs_true(self):
+        """Plot 1: Scatter plots of predictions vs true values"""
+        fig, axes = plt.subplots(1, self.n_outputs, figsize=(6*self.n_outputs, 5))
+        if self.n_outputs == 1:
+            axes = [axes]
+        
+        for i, (ax, name) in enumerate(zip(axes, self.param_names)):
+            preds_i = self.predictions[:, i]
+            labels_i = self.labels[:, i]
+            
+            ax.scatter(labels_i, preds_i, alpha=0.5, s=10)
+            
+            # Perfect prediction line
+            min_val, max_val = labels_i.min(), labels_i.max()
+            ax.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='Perfect prediction')
+            
+            # Calculate metrics
+            residuals = preds_i - labels_i
+            mae = np.mean(np.abs(residuals))
+            rmse = np.sqrt(np.mean(residuals**2))
+            r2 = 1 - np.sum(residuals**2) / np.sum((labels_i - labels_i.mean())**2)
+            
+            ax.set_xlabel(f'True {name}')
+            ax.set_ylabel(f'Predicted {name}')
+            ax.set_title(f'{name}\nMAE={mae:.4f}, RMSE={rmse:.4f}, R²={r2:.4f}')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        return self._save_and_log(fig, 'test/predictions_vs_true')
+    
+    def plot_residual_distributions(self):
+        """Plot 2: Residual distribution histograms"""
+        fig, axes = plt.subplots(1, self.n_outputs, figsize=(6*self.n_outputs, 4))
+        if self.n_outputs == 1:
+            axes = [axes]
+        
+        for i, (ax, name) in enumerate(zip(axes, self.param_names)):
+            residuals = self.predictions[:, i] - self.labels[:, i]
+            
+            ax.hist(residuals, bins=50, alpha=0.7, edgecolor='black')
+            ax.axvline(0, color='r', linestyle='--', lw=2, label='Zero error')
+            ax.axvline(np.median(residuals), color='g', linestyle='--', lw=2, 
+                      label=f'Median={np.median(residuals):.4f}')
+            
+            ax.set_xlabel(f'Residual (Pred - True) for {name}')
+            ax.set_ylabel('Count')
+            ax.set_title(f'{name} Residual Distribution\nStd={np.std(residuals):.4f}')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        return self._save_and_log(fig, 'test/residual_distributions')
+    
+    def plot_metrics_comparison(self):
+        """Plot 3: Bar chart comparing metrics across parameters"""
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+        
+        metrics_data = {'MAE': [], 'RMSE': [], 'R²': []}
+        for i in range(self.n_outputs):
+            residuals = self.predictions[:, i] - self.labels[:, i]
+            mae = np.mean(np.abs(residuals))
+            rmse = np.sqrt(np.mean(residuals**2))
+            r2 = 1 - np.sum(residuals**2) / np.sum((self.labels[:, i] - self.labels[:, i].mean())**2)
+            
+            metrics_data['MAE'].append(mae)
+            metrics_data['RMSE'].append(rmse)
+            metrics_data['R²'].append(r2)
+        
+        x = np.arange(self.n_outputs)
+        width = 0.25
+        
+        ax.bar(x - width, metrics_data['MAE'], width, label='MAE', alpha=0.8)
+        ax.bar(x, metrics_data['RMSE'], width, label='RMSE', alpha=0.8)
+        ax.bar(x + width, metrics_data['R²'], width, label='R²', alpha=0.8)
+        
+        ax.set_xlabel('Parameters')
+        ax.set_ylabel('Metric Value')
+        ax.set_title('Performance Metrics per Parameter')
+        ax.set_xticks(x)
+        ax.set_xticklabels(self.param_names)
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        return self._save_and_log(fig, 'test/metrics_per_parameter')
+    
+    def plot_residual_correlation(self):
+        """Plot 4: Correlation heatmap of residuals (multi-output only)"""
+        if self.n_outputs < 2:
+            return None
+        
+        fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+        
+        residuals_all = self.predictions - self.labels
+        corr_matrix = np.corrcoef(residuals_all.T)
+        
+        im = ax.imshow(corr_matrix, cmap='RdBu_r', vmin=-1, vmax=1, aspect='auto')
+        
+        ax.set_xticks(np.arange(self.n_outputs))
+        ax.set_yticks(np.arange(self.n_outputs))
+        ax.set_xticklabels(self.param_names)
+        ax.set_yticklabels(self.param_names)
+        
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('Correlation', rotation=270, labelpad=20)
+        
+        # Add correlation values
+        for i in range(self.n_outputs):
+            for j in range(self.n_outputs):
+                text = ax.text(j, i, f'{corr_matrix[i, j]:.2f}',
+                             ha="center", va="center", color="black")
+        
+        ax.set_title('Residual Correlation Heatmap')
+        plt.tight_layout()
+        return self._save_and_log(fig, 'test/residual_correlation')
+    
+    def plot_error_vs_true(self):
+        """Plot 5: Error vs true value (detect systematic biases)"""
+        fig, axes = plt.subplots(1, self.n_outputs, figsize=(6*self.n_outputs, 5))
+        if self.n_outputs == 1:
+            axes = [axes]
+        
+        for i, (ax, name) in enumerate(zip(axes, self.param_names)):
+            residuals = self.predictions[:, i] - self.labels[:, i]
+            labels_i = self.labels[:, i]
+            
+            ax.scatter(labels_i, residuals, alpha=0.5, s=10)
+            ax.axhline(0, color='r', linestyle='--', lw=2, label='Zero error')
+            
+            # Add moving average to show trends
+            sorted_idx = np.argsort(labels_i)
+            window = max(len(labels_i) // 20, 3)  # Ensure minimum window size
+            if window > 1 and len(labels_i) >= window:
+                moving_avg = np.convolve(residuals[sorted_idx], 
+                                        np.ones(window)/window, mode='valid')
+                # Calculate correct indices for moving average
+                start_idx = window // 2
+                moving_x = labels_i[sorted_idx][start_idx:start_idx + len(moving_avg)]
+                ax.plot(moving_x, moving_avg, 'g-', lw=2, label='Moving average')
+            
+            ax.set_xlabel(f'True {name}')
+            ax.set_ylabel(f'Residual (Pred - True)')
+            ax.set_title(f'{name}: Error vs True Value')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        return self._save_and_log(fig, 'test/error_vs_true')
+    
+    def plot_qq(self):
+        """Plot 6: Q-Q plots for residual normality check"""
+        try:
+            from scipy import stats
+        except ImportError:
+            print("Warning: scipy not available, skipping Q-Q plots")
+            return None
+        
+        fig, axes = plt.subplots(1, self.n_outputs, figsize=(6*self.n_outputs, 5))
+        if self.n_outputs == 1:
+            axes = [axes]
+        
+        for i, (ax, name) in enumerate(zip(axes, self.param_names)):
+            residuals = self.predictions[:, i] - self.labels[:, i]
+            stats.probplot(residuals, dist="norm", plot=ax)
+            ax.set_title(f'{name}: Q-Q Plot\n(Check residual normality)')
+            ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        return self._save_and_log(fig, 'test/qq_plots')
+    
+    def plot_comprehensive_summary(self):
+        """Plot 10: Comprehensive 3-row summary figure"""
+        from scipy.stats import norm
+        
+        fig = plt.figure(figsize=(18, 12))
+        gs = fig.add_gridspec(3, self.n_outputs, hspace=0.3, wspace=0.3)
+        
+        for i, name in enumerate(self.param_names):
+            preds_i = self.predictions[:, i]
+            labels_i = self.labels[:, i]
+            residuals = preds_i - labels_i
+            
+            # Row 1: Scatter plot with metrics
+            ax1 = fig.add_subplot(gs[0, i])
+            ax1.scatter(labels_i, preds_i, alpha=0.4, s=5)
+            min_val, max_val = labels_i.min(), labels_i.max()
+            ax1.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+            
+            mae = np.mean(np.abs(residuals))
+            rmse = np.sqrt(np.mean(residuals**2))
+            r2 = 1 - np.sum(residuals**2) / np.sum((labels_i - labels_i.mean())**2)
+            
+            ax1.text(0.05, 0.95, f'MAE: {mae:.4f}\nRMSE: {rmse:.4f}\nR²: {r2:.4f}',
+                    transform=ax1.transAxes, verticalalignment='top',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            ax1.set_xlabel(f'True {name}')
+            ax1.set_ylabel(f'Predicted {name}')
+            ax1.set_title(f'{name}')
+            ax1.grid(True, alpha=0.3)
+            
+            # Row 2: Residual distribution
+            ax2 = fig.add_subplot(gs[1, i])
+            ax2.hist(residuals, bins=40, alpha=0.7, edgecolor='black', density=True)
+            
+            # Fit normal distribution
+            mu, sigma = residuals.mean(), residuals.std()
+            x = np.linspace(residuals.min(), residuals.max(), 100)
+            ax2.plot(x, norm.pdf(x, mu, sigma), 'r-', lw=2, label=f'Normal fit\nμ={mu:.4f}\nσ={sigma:.4f}')
+            ax2.axvline(0, color='g', linestyle='--', lw=2, label='Zero')
+            ax2.set_xlabel('Residual')
+            ax2.set_ylabel('Density')
+            ax2.legend(fontsize=8)
+            ax2.grid(True, alpha=0.3)
+            
+            # Row 3: Error vs True value
+            ax3 = fig.add_subplot(gs[2, i])
+            ax3.scatter(labels_i, residuals, alpha=0.4, s=5)
+            ax3.axhline(0, color='r', linestyle='--', lw=2)
+            
+            # Add standard deviation bands
+            ax3.axhline(sigma, color='orange', linestyle=':', lw=1.5, label=f'±1σ')
+            ax3.axhline(-sigma, color='orange', linestyle=':', lw=1.5)
+            ax3.axhline(2*sigma, color='red', linestyle=':', lw=1.5, label=f'±2σ')
+            ax3.axhline(-2*sigma, color='red', linestyle=':', lw=1.5)
+            
+            ax3.set_xlabel(f'True {name}')
+            ax3.set_ylabel('Residual')
+            ax3.legend(fontsize=8)
+            ax3.grid(True, alpha=0.3)
+        
+        fig.suptitle('Comprehensive Regression Analysis Summary', fontsize=16, y=0.995)
+        plt.tight_layout()
+        return self._save_and_log(fig, 'test/comprehensive_summary')
+    
+    def print_statistics(self):
+        """Print detailed statistics to console"""
+        print("\n" + "="*80)
+        print("DETAILED TEST STATISTICS")
+        print("="*80)
+        for i, name in enumerate(self.param_names):
+            residuals = self.predictions[:, i] - self.labels[:, i]
+            abs_errors = np.abs(residuals)
+            
+            print(f"\n{name}:")
+            print(f"  MAE:     {abs_errors.mean():.6f}")
+            print(f"  RMSE:    {np.sqrt((residuals**2).mean()):.6f}")
+            print(f"  Max Err: {abs_errors.max():.6f}")
+            print(f"  Median:  {np.median(abs_errors):.6f}")
+            print(f"  Std:     {residuals.std():.6f}")
+            print(f"  R²:      {1 - np.sum(residuals**2) / np.sum((self.labels[:, i] - self.labels[:, i].mean())**2):.6f}")
+            
+            # Percentiles
+            print(f"  Error Percentiles:")
+            for p in [50, 75, 90, 95, 99]:
+                print(f"    {p}%: {np.percentile(abs_errors, p):.6f}")
+        print("="*80 + "\n")
+    
+    def generate_all_plots(self, quick_mode=False):
+        """
+        Generate all evaluation plots.
+        
+        Args:
+            quick_mode: If True, only generate essential plots (1, 2, 3, 10)
+        """
+        print("Generating evaluation plots...")
+        
+        # Essential plots (always generate)
+        self.plot_predictions_vs_true()
+        self.plot_residual_distributions()
+        self.plot_metrics_comparison()
+        
+        if not quick_mode:
+            # Advanced plots
+            if self.n_outputs > 1:
+                self.plot_residual_correlation()
+            self.plot_error_vs_true()
+            self.plot_qq()
+            self.plot_comprehensive_summary()
+        else:
+            # Still generate comprehensive summary in quick mode
+            self.plot_comprehensive_summary()
+        
+        # Always print statistics
+        self.print_statistics()
+        
+        print(f"All plots saved to: {self.save_dir}")
+#endregion --REGRESSION PLOTTER-----------------------------------------------------------

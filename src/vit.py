@@ -13,6 +13,8 @@ from src.callbacks import PreprocessorFreezeCallback
 SAVE_DIR = os.environ.get('WANDB_DIR', './wandb')
 # Checkpoint directory: read from env CHECKPOINT_DIR, fallback to ./checkpoints
 CKPT_DIR = os.environ.get('CKPT_DIR', './checkpoints')
+# Plot save directory
+PLOT_DIR = os.environ.get('PLOT_DIR', './results/test_plots')
 # MASK_PATH = './bosz50000_mask.npy'
 
 #region --DATA-----------------------------------------------------------
@@ -125,8 +127,61 @@ class ViTLModule(BaseLightningModule):
     def validation_step(self, batch, batch_idx):
         return self._shared_eval_step(batch, 'val')
 
+    def on_test_start(self):
+        """Initialize dict for collecting test predictions and labels (regression only)"""
+        if self.task_type == 'reg':
+            self.test_dict = {'preds': [], 'labels': []}
+
     def test_step(self, batch, batch_idx):
-        return self._shared_eval_step(batch, 'test')
+        loss = self._shared_eval_step(batch, 'test')
+        
+        # Collect predictions and labels for regression plotting
+        if self.task_type == 'reg':
+            # Extract data from batch
+            if len(batch) == 4:
+                noisy, flux, error, labels = batch
+                inputs = noisy if self.noise_level > 0 else flux
+            else:
+                flux, error, labels = batch
+                inputs = flux
+            
+            # Get predictions
+            outputs = self.forward(inputs, labels, loss_only=False)
+            preds = outputs.logits.squeeze()
+            
+            # Store for plotting
+            self.test_dict['preds'].append(preds.detach().cpu())
+            self.test_dict['labels'].append(labels.detach().cpu())
+        
+        return loss
+
+    def on_test_epoch_end(self):
+        """Generate evaluation plots after testing (regression only)"""
+        if self.task_type != 'reg' or not self.test_dict['preds']:
+            return
+        
+        # Concatenate all predictions and labels
+        import numpy as np
+        all_preds = torch.cat(self.test_dict['preds'], dim=0).numpy()
+        all_labels = torch.cat(self.test_dict['labels'], dim=0).numpy()
+        
+        # Get parameter names from config
+        n_outputs = all_preds.shape[1] if len(all_preds.shape) > 1 else 1
+        param_names = self.config.get('model', {}).get('param_names', ['Teff', 'log_g', 'M_H'][:n_outputs])
+        
+        # Use RegressionPlotter for all visualizations
+        from src.plotter import RegressionPlotter
+        plotter = RegressionPlotter(
+            predictions=all_preds,
+            labels=all_labels,
+            param_names=param_names,
+            logger=self.logger,
+            save_dir=PLOT_DIR
+        )
+        
+        # Generate all plots (use quick_mode=True for faster execution)
+        quick_mode = self.config.get('plotting', {}).get('quick_mode', False)
+        plotter.generate_all_plots(quick_mode=quick_mode)
 
     def on_train_start(self):
         # Log explained variance (if GlobalAttnViT with PCA stats and r provided)
@@ -250,7 +305,7 @@ class SpecTrainer():
             )
             self.trainer.callbacks.append(checkpoint_callback)
             
-        earlystopping_callback = L.pytorch.callbacks.EarlyStopping(monitor=f'val_{monitor_name}', patience=patience, mode=monitor_mode, divergence_threshold=1,)
+        earlystopping_callback = L.pytorch.callbacks.EarlyStopping(monitor=f'val_{monitor_name}', patience=patience, mode=monitor_mode, divergence_threshold=None,)
         self.trainer.callbacks.append(earlystopping_callback)
         # For regression, add original-scale plotting callback at test time
         # if task_type == 'reg':

@@ -33,7 +33,28 @@ class BaseDataModule(L.LightningDataModule):
     def from_config(cls, dataset_cls=BaseDataset, config: Dict[str, Any]={}):
         train_config = config.get('train', {})
         # Accept both 'num_workers' and legacy 'workers'
-        num_workers = train_config.get('num_workers', train_config.get('workers', 24))
+        num_workers_config = train_config.get('num_workers', train_config.get('workers', None))
+        
+        # Smart worker detection: auto-configure based on environment
+        if num_workers_config is None:
+            # Auto-detect: use more workers on server with many CPUs/GPUs
+            cpu_count = os.cpu_count() or 1
+            gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+            
+            # Server detection: many CPUs (>50) and multiple GPUs (>4)
+            is_server = cpu_count > 50 and gpu_count > 4
+            
+            if is_server:
+                # Server: use 16 workers per GPU (or 16 if no GPU)
+                num_workers = max(16, min(gpu_count * 16, cpu_count // 2))
+                print(f"[DataModule] Auto-detected SERVER environment: {cpu_count} CPUs, {gpu_count} GPUs -> using {num_workers} workers")
+            else:
+                # Local/Mac: use 0 workers to avoid multiprocessing issues
+                num_workers = 0
+                print(f"[DataModule] Auto-detected LOCAL environment: {cpu_count} CPUs, {gpu_count} GPUs -> using {num_workers} workers (single-process)")
+        else:
+            num_workers = num_workers_config
+            
         return cls(
             batch_size=train_config.get('batch_size', 256),
             num_workers=num_workers,
@@ -87,7 +108,7 @@ class BaseDataModule(L.LightningDataModule):
                           batch_size=self.batch_size,
                           num_workers=self.num_workers,
                           pin_memory=True,
-                          persistent_workers=True,
+                          persistent_workers=self.num_workers > 0,
                           shuffle=False) 
 #endregion DM-----------------------------------------------------------
 
@@ -176,7 +197,7 @@ class BaseTrainer(L.Trainer):
             precision=precision,
             gradient_clip_val=config.get('grad_clip', 0.5),
             # stochastic_weight_avg=True,
-            fast_dev_run=config.get('debug', False),
+            fast_dev_run=bool(config.get('debug', False)),
             enable_checkpointing=enable_checkpointing,
             enable_progress_bar=enable_progress_bar,
             enable_model_summary=enable_model_summary,

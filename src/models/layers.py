@@ -13,14 +13,29 @@ class PrefilledLinear(nn.Module):
     def __init__(self, matrix: torch.Tensor, freeze: bool = True) -> None:
         super().__init__()
         weight = matrix.to(torch.float32)
-        self.lin = nn.Linear(weight.shape[1], weight.shape[0], bias=False)
-        with torch.no_grad():
-            self.lin.weight.copy_(weight)
-        self.freeze(freeze)
+        
+        if freeze:
+            # Register as buffer (not counted as parameter)
+            self.register_buffer('weight', weight)
+            self._is_frozen = True
+        else:
+            # Register as parameter (trainable)
+            self.weight = nn.Parameter(weight)
+            self._is_frozen = False
 
     def freeze(self, freeze: bool = True) -> None:
-        for param in self.lin.parameters():
-            param.requires_grad = not freeze
+        if freeze and not self._is_frozen:
+            # Convert parameter to buffer
+            weight_data = self.weight.data.clone()
+            del self.weight
+            self.register_buffer('weight', weight_data)
+            self._is_frozen = True
+        elif not freeze and self._is_frozen:
+            # Convert buffer to parameter
+            weight_data = self.weight.clone()
+            delattr(self, 'weight')
+            self.weight = nn.Parameter(weight_data)
+            self._is_frozen = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.lin(x)
+        return torch.nn.functional.linear(x, self.weight, bias=None)
