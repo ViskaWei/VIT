@@ -100,9 +100,8 @@ if __name__ == "__main__":
     parser.add_argument('--sweep_id', type=str, default=None, help='Run as W&B agent for an existing sweep ID (accepts short ID or entity/project/ID)')
     parser.add_argument('--entity', type=str, default=os.environ.get('WANDB_ENTITY'), help='W&B entity (org/user)')
     parser.add_argument('--project', type=str, default=os.environ.get('WANDB_PROJECT', 'vit-test'), help='W&B project name')
-    # Accept sweep-injected overrides to avoid argparse errors
-    parser.add_argument('--r', type=int, default=None)
     parser.add_argument('--vit_config', type=str, default=None)
+    # Accept any sweep parameters as unknown args (they'll be in wandb.config)
     args, _unknown = parser.parse_known_args()
 
     if args.sweep_id:
@@ -115,5 +114,10 @@ if __name__ == "__main__":
             wandb.agent(args.sweep_id, function=lambda: train_fn(args), entity=args.entity, project=args.project)
     else:
         # Direct run under a sweep-like context (set default config)
-        wandb.init(project=args.project or 'vit-test', config={'r': args.r or 32, 'vit_config': args.vit_config or os.environ.get('VIT_CONFIG', 'configs/vit.yaml')})
+        wandb.init(
+            project=args.project or 'vit-test', 
+            config={
+                'vit_config': args.vit_config or os.environ.get('VIT_CONFIG', 'configs/vit.yaml')
+            }
+        )
         train_fn(args)

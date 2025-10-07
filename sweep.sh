@@ -61,8 +61,8 @@ fi
 echo "Creating sweep: config=${SWEEP_YAML}, entity=${ENTITY}, project=${PROJECT}"
 CREATE_OUT=$(wandb sweep -e "${ENTITY}" -p "${PROJECT}" "${SWEEP_YAML}" 2>&1 | tee /dev/stderr)
 
-# Extract short sweep id
-SWEEP_ID=$(echo "${CREATE_OUT}" | sed -n 's/.*Creating sweep with ID: \([a-z0-9]\+\).*/\1/p' | tail -n1)
+# Extract short sweep id using grep (more portable than sed)
+SWEEP_ID=$(echo "${CREATE_OUT}" | grep -oE 'Creating sweep with ID: [a-zA-Z0-9]+' | grep -oE '[a-zA-Z0-9]+$' | tail -n1)
 if [[ -z "${SWEEP_ID}" ]]; then
   echo "Failed to parse sweep ID from wandb output." >&2
   exit 1
@@ -82,7 +82,7 @@ for GPU in "${GPU_ARR[@]}"; do
     CUDA_VISIBLE_DEVICES="${GPU}" wandb agent "${FULL_ID}" &
   fi
   PIDS+=($!)
-  echo "Started agent on GPU ${GPU} with PID ${PIDS[-1]}"
+  echo "Started agent on GPU ${GPU} with PID $!"
 done
 
 echo "All agents started. Waiting... (Ctrl-C to stop)"
