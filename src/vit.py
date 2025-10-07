@@ -181,7 +181,7 @@ class SpecTrainer():
         self.trainer = BaseTrainer(config=config.get('train', {}), logger=logger, num_gpus=num_gpus, sweep=sweep)
         
         # Add preprocessor freeze callback if configured
-        warmup_cfg = config.get('warmup', {})
+        warmup_cfg = config.get('warmup') or {}
         freeze_epochs = warmup_cfg.get('freeze_epochs', 0)
         if freeze_epochs > 0:
             self.trainer.callbacks.append(PreprocessorFreezeCallback(freeze_epochs=freeze_epochs))
