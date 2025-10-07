@@ -17,8 +17,9 @@ def get_model(config):
     warmup_cfg = config.get("warmup", {}) or {}
     loss_name = config.get("loss", {}).get("name", None)
     
-    preproc_type = warmup_cfg.get("preprocessor", None)  # "zca", "pca", "attention"
-    if preproc_type is None:
+    preproc_type = warmup_cfg.get("preprocessor", None)  # "zca", "pca", "attention", or "None"
+    # Handle None, null, or string "None"
+    if preproc_type is None or str(preproc_type).lower() in ("none", "null"):
         # No preprocessor
         model = MyViT(vit_config, loss_name=loss_name, model_name="ViT")
         print(f"[builder] Created vanilla ViT model")
