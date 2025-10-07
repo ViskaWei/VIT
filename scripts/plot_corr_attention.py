@@ -6,13 +6,9 @@ import json
 from pathlib import Path
 from typing import Dict, List
 
-import matplotlib.pyplot as plt
-import numpy as np
 import torch
-import seaborn as sns
 
 import sys
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -23,8 +19,11 @@ from src.analysis.corr_attention import (
     rowwise_correlation,
     topk_overlap,
 )
-
-sns.set_theme(style="whitegrid")
+from scripts.plot_utils import (
+    plot_matrix_heatmap,
+    plot_distribution_histogram,
+    plot_metric_curve,
+)
 
 
 def _load_tensor(path: Path) -> torch.Tensor:
@@ -54,50 +53,6 @@ def _convert_lines(lines: List[dict], full_size: int, target_size: int) -> List[
         (entry["name"], entry["index"] / factor)
         for entry in lines
     ]
-
-
-def plot_heatmap(mat: torch.Tensor, title: str, out_path: Path, lines: List[tuple[str, float]] | None = None) -> None:
-    fig, ax = plt.subplots(figsize=(6, 5))
-    im = ax.imshow(mat.numpy(), cmap="magma", aspect="auto")
-    ax.set_title(title)
-    ax.set_xlabel("Wavelength bins")
-    ax.set_ylabel("Wavelength bins")
-    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    if lines:
-        for name, loc in lines:
-            ax.axvline(loc, color="cyan", linestyle="--", linewidth=0.5)
-            ax.axhline(loc, color="cyan", linestyle="--", linewidth=0.5)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
-
-
-def plot_row_correlation(corr_map: Dict[int, torch.Tensor], out_path: Path) -> None:
-    fig, ax = plt.subplots(figsize=(6, 4))
-    bins = np.linspace(-1.0, 1.0, 60)
-    for rank, values in corr_map.items():
-        ax.hist(values.numpy(), bins=bins, alpha=0.4, label=f"k={rank}")
-    ax.set_xlabel("Row correlation with attention")
-    ax.set_ylabel("Count")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
-
-
-def plot_topk_curve(curve: Dict[int, Dict[int, float]], out_path: Path) -> None:
-    fig, ax = plt.subplots(figsize=(6, 4))
-    topk_values = sorted({k for curves in curve.values() for k in curves.keys()})
-    for rank, scores in curve.items():
-        y = [scores.get(k, np.nan) for k in topk_values]
-        ax.plot(topk_values, y, marker="o", label=f"k={rank}")
-    ax.set_xlabel("Top-K")
-    ax.set_ylabel("Mean overlap")
-    ax.set_ylim(0.0, 1.0)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
 
 
 def parse_args() -> argparse.Namespace:
@@ -146,9 +101,9 @@ def main() -> None:
 
     # Prepare heatmaps
     line_marks = _convert_lines(spectral_lines, image_size, attention.shape[0]) if spectral_lines else None
-    plot_heatmap(attention, "Attention (row-normalised)", out_dir / "attention_heatmap.png", line_marks)
+    plot_matrix_heatmap(attention, "Attention (row-normalised)", out_dir / "attention_heatmap.png", line_marks)
     for rank, mat in matrices.items():
-        plot_heatmap(mat, f"Softmax(C_k) with k={rank}", out_dir / f"softmax_k{rank}_heatmap.png", line_marks)
+        plot_matrix_heatmap(mat, f"Softmax(C_k) with k={rank}", out_dir / f"softmax_k{rank}_heatmap.png", line_marks)
 
     # Compute metrics using full-resolution matrices when available
     if not args.use_downsample and (eval_dir / "attention_wave.pt").exists():
@@ -174,8 +129,21 @@ def main() -> None:
             curve[k] = float(overlap.mean().item())
         topk_curves[rank] = curve
 
-    plot_row_correlation(corr_vectors, out_dir / "row_correlation_hist.png")
-    plot_topk_curve(topk_curves, out_dir / "topk_overlap_curve.png")
+    plot_distribution_histogram(
+        corr_vectors,
+        "Row Correlation with Attention",
+        "Correlation",
+        out_dir / "row_correlation_hist.png",
+        xlim=(-1.0, 1.0),
+    )
+    plot_metric_curve(
+        topk_curves,
+        "Top-K Overlap",
+        "Top-K",
+        "Mean Overlap",
+        out_dir / "topk_overlap_curve.png",
+        ylim=(0.0, 1.0),
+    )
 
     # Save metrics redux as CSV-like JSON for convenience
     summary = {}
