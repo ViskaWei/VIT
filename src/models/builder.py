@@ -40,16 +40,72 @@ def _log_freeze_status(freeze_epochs: int) -> None:
         print("[builder] Preprocessor is trainable from start")
 
 
+def _build_preprocessor(preproc_type: str, warmup_cfg: dict, stats: dict, input_dim: int, initial_freeze: bool):
+    """Build preprocessor and return (preprocessor, output_dim, model_name_prefix, description)
+    
+    Args:
+        preproc_type: Type of preprocessor ("zca", "pca", "attention")
+        warmup_cfg: Warmup configuration dict
+        stats: Statistics dict with eigvecs, eigvals
+        input_dim: Input dimension
+        initial_freeze: Whether to freeze initially
+    
+    Returns:
+        Tuple of (preprocessor, output_dim, model_name_prefix, description)
+    """
+    eigvecs = stats["eigvecs"]
+    r = warmup_cfg.get("r", None)
+    fz_suffix = _get_freeze_suffix(warmup_cfg.get("freeze_epochs", 0))
+    
+    if preproc_type == "zca":
+        eigvals = stats["eigvals"]
+        eps = warmup_cfg.get("eps", 1e-5)
+        shrinkage = warmup_cfg.get("shrinkage", 0.0)
+        
+        P = compute_zca_matrix(eigvecs, eigvals, eps=eps, r=r, shrinkage=shrinkage)
+        preprocessor = LinearPreprocessor(P, freeze=initial_freeze)
+        output_dim = P.shape[0]  # Output dimension from ZCA matrix
+        
+        rank_str = f"ZCA{r}" if r is not None else "ZCA"
+        shrink_str = f"_s{int(shrinkage*10)}"
+        name_prefix = f"{rank_str}_fz{fz_suffix}{shrink_str}"
+        desc = f"{'low-rank' if r else 'full-rank'} ZCA, eps={eps}, shrinkage={shrinkage}"
+        
+    elif preproc_type == "pca":
+        P = compute_pca_matrix(eigvecs, r=r)
+        preprocessor = LinearPreprocessor(P, freeze=initial_freeze)
+        output_dim = P.shape[0]  # Output dimension from PCA matrix
+        
+        rank_str = f"PCA{r}" if r is not None else "PCA"
+        name_prefix = f"{rank_str}_fz{fz_suffix}"
+        desc = f"PCA with r={r}" if r else "full-rank PCA"
+        
+    elif preproc_type == "attention":
+        preprocessor = PrefilledAttention(input_dim=input_dim, eigvecs=eigvecs, r=r)
+        output_dim = r if r is not None else input_dim
+        
+        rank_str = r if r else "Full"
+        name_prefix = f"Attn{rank_str}_fz{fz_suffix}"
+        desc = f"Attention preprocessor with r={r}"
+        
+    else:
+        raise ValueError(f"Unknown preprocessor type: '{preproc_type}'")
+    
+    return preprocessor, output_dim, name_prefix, desc
+
+
 def get_model(config):
-    """Build model with optional preprocessor (ZCA/PCA/Attention)"""
-    vit_config = get_vit_config(config)
+    """Build model with optional preprocessor (ZCA/PCA/Attention)
+    
+    Automatically adjusts image_size to match preprocessor output dimension.
+    """
     warmup_cfg = config.get("warmup", {}) or {}
     loss_name = config.get("loss", {}).get("name", None)
+    preproc_type = warmup_cfg.get("preprocessor", None)
     
-    preproc_type = warmup_cfg.get("preprocessor", None)  # "zca", "pca", "attention", or "None"
     # Handle None, null, or string "None"
     if preproc_type is None or str(preproc_type).lower() in ("none", "null"):
-        # No preprocessor
+        vit_config = get_vit_config(config)
         model = MyViT(vit_config, loss_name=loss_name, model_name="ViT")
         print(f"[builder] Created vanilla ViT model")
         return model
@@ -60,78 +116,40 @@ def get_model(config):
         raise ValueError(f"preprocessor='{preproc_type}' requires 'cov_path' in warmup config")
     
     stats = load_cov_stats(cov_path)
-    eigvecs = stats["eigvecs"]  # (input_dim, input_dim)
+    eigvecs = stats["eigvecs"]
     input_dim = eigvecs.shape[0]
+    original_image_size = config["model"]["image_size"]
     
-    if input_dim != vit_config.image_size:
+    if input_dim != original_image_size:
         raise ValueError(
-            f"Mismatch: eigvecs dimension {input_dim} != image_size {vit_config.image_size}"
+            f"Mismatch: eigvecs dimension {input_dim} != image_size {original_image_size}"
         )
     
-    # Determine initial freeze state
+    # Build preprocessor and get output dimension
     freeze_epochs = warmup_cfg.get("freeze_epochs", 0)
-    initial_freeze = freeze_epochs != 0  # Frozen if != 0 (either temporary or permanent)
-    fz_suffix = _get_freeze_suffix(freeze_epochs)
+    initial_freeze = freeze_epochs != 0
     
-    preprocessor = None
-    model_name = "ViT"
+    preprocessor, output_dim, name_prefix, desc = _build_preprocessor(
+        preproc_type, warmup_cfg, stats, input_dim, initial_freeze
+    )
     
-    if preproc_type == "zca":
-        # ZCA whitening: P @ x where P.T @ cov @ P = I
-        # Supports both full-rank (r=None) and low-rank (r>0) ZCA
-        eigvals = stats["eigvals"]
-        eps = warmup_cfg.get("eps", 1e-5)
-        r = warmup_cfg.get("r", None)
-        shrinkage = warmup_cfg.get("shrinkage", 0.0)
-        
-        P = compute_zca_matrix(eigvecs, eigvals, eps=eps, r=r, shrinkage=shrinkage)
-        preprocessor = LinearPreprocessor(P, freeze=initial_freeze)
-        
-        # Model name
-        rank_str = f"ZCA{r}" if r is not None else "ZCA"
-        shrink_str = f"_s{int(shrinkage*10)}"
-        model_name = f"{rank_str}_fz{fz_suffix}{shrink_str}_ViT"
-        
-        # Log
-        rank_desc = f"low-rank ZCA with r={r}" if r else "full-rank ZCA"
-        print(f"[builder] Created {rank_desc}, eps={eps}, shrinkage={shrinkage}")
-        
-    elif preproc_type == "pca":
-        # PCA projection: V[:, :r].T @ x (low-rank or full-rank)
-        r = warmup_cfg.get("r", None)
-        P = compute_pca_matrix(eigvecs, r=r)
-        preprocessor = LinearPreprocessor(P, freeze=initial_freeze)
-        
-        # Model name
-        rank_str = f"PCA{r}" if r is not None else "PCA"
-        model_name = f"{rank_str}_fz{fz_suffix}_ViT"
-        
-        # Log
-        rank_desc = f"PCA with r={r}" if r else "full-rank PCA"
-        print(f"[builder] Created {rank_desc} preprocessor")
-        
-    elif preproc_type == "attention":
-        # Global attention with Q, K initialized from eigenvectors
-        r = warmup_cfg.get("r", None)
-        preprocessor = PrefilledAttention(input_dim=input_dim, eigvecs=eigvecs, r=r)
-        
-        # Model name
-        rank_str = r if r else "Full"
-        model_name = f"Attn{rank_str}_fz{fz_suffix}_ViT"
-        
-        # Log
-        print(f"[builder] Created Attention preprocessor with r={r}")
-        
-    else:
-        raise ValueError(f"Unknown preprocessor type: '{preproc_type}'")
+    # Auto-adjust image_size to match preprocessor output
+    if output_dim != original_image_size:
+        print(f"[builder] Auto-adjusting image_size: {original_image_size} → {output_dim}")
+        config["model"]["image_size"] = output_dim
     
-    # Log freeze status
+    # Build ViT config with adjusted image_size
+    vit_config = get_vit_config(config)
+    
+    # Log preprocessor creation
+    print(f"[builder] Created {desc} preprocessor")
     _log_freeze_status(freeze_epochs)
     
+    # Build model
     model = MyViT(
         vit_config,
         loss_name=loss_name,
-        model_name=model_name,
+        model_name=f"{name_prefix}_ViT",
         preprocessor=preprocessor,
     )
     
