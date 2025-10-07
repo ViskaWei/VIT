@@ -194,18 +194,13 @@ if __name__ == "__main__":
     # X = S @ B.T  # 无噪声合成谱：低秩+平滑相关
     import h5py
     import os
-    num_samples = 1000
+    num_samples = 10000
     TRAIN_DIR = os.getenv("TRAIN_DIR")
     with h5py.File(f"{TRAIN_DIR}/dataset.h5", "r") as f:
-            flux = torch.Tensor(f['dataset/arrays/flux/value'][:num_samples])
-    X = flux - flux.mean(dim=0, keepdim=True)  # 中心化
-
-
+            X = torch.Tensor(f['dataset/arrays/flux/value'][:num_samples])
     print(f"X shape: {X.shape} (no noise)")
-
-    # 跑一遍 ZCA 流水线
+    
     rep = zca_pipeline(X, gamma=0.1, eps=1e-6, r=None, perp_mode="identity")
-
     print("\n=== ZCA REPORT (full-rank) ===")
     print(f"sym_err(P vs P^T):           {rep.sym_err:.3e}  (应极小)")
     print(f"white_err_self (P^T Ĉ P):   {rep.white_err_self:.3e}  (越小越好, <1e-1 合理)")

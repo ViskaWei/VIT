@@ -35,25 +35,45 @@ class BaseDataModule(L.LightningDataModule):
         # Accept both 'num_workers' and legacy 'workers'
         num_workers_config = train_config.get('num_workers', train_config.get('workers', None))
         
-        # Smart worker detection: auto-configure based on environment
-        if num_workers_config is None:
-            # Auto-detect: use more workers on server with many CPUs/GPUs
+        # Allow environment variable override (highest priority)
+        env_num_workers = os.environ.get('NUM_WORKERS')
+        if env_num_workers is not None:
+            num_workers = int(env_num_workers)
+            print(f"[DataModule] Using NUM_WORKERS from environment: {num_workers}")
+        elif num_workers_config is None:
+            # Smart auto-detection: optimize workers based on environment
             cpu_count = os.cpu_count() or 1
             gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+            batch_size = train_config.get('batch_size', 256)
             
             # Server detection: many CPUs (>50) and multiple GPUs (>4)
             is_server = cpu_count > 50 and gpu_count > 4
             
             if is_server:
-                # Server: use 16 workers per GPU (or 16 if no GPU)
-                num_workers = max(16, min(gpu_count * 16, cpu_count // 2))
-                print(f"[DataModule] Auto-detected SERVER environment: {cpu_count} CPUs, {gpu_count} GPUs -> using {num_workers} workers")
+                # Server: optimize for high I/O throughput
+                # Rule of thumb: 4-8 workers per GPU, but adjusted by batch size
+                # Larger batch sizes need fewer workers (GPU becomes bottleneck)
+                # Smaller batch sizes need more workers (I/O becomes bottleneck)
+                if batch_size >= 512:
+                    # Large batch: GPU-bound, moderate workers
+                    base_workers = min(4 * gpu_count, 32)
+                elif batch_size >= 128:
+                    # Medium batch: balanced
+                    base_workers = min(6 * gpu_count, 48)
+                else:
+                    # Small batch: I/O-bound, more workers
+                    base_workers = min(8 * gpu_count, 63)
+                
+                # Cap at safe limits: leave headroom for system and don't exceed PyTorch Lightning recommendation
+                num_workers = min(base_workers, cpu_count - 1, 63)
+                print(f"[DataModule] Auto-detected SERVER environment: {cpu_count} CPUs, {gpu_count} GPUs, batch_size={batch_size} -> using {num_workers} workers")
             else:
-                # Local/Mac: use 0 workers to avoid multiprocessing issues
+                # Local/Mac: use 0 workers to avoid multiprocessing issues on macOS
                 num_workers = 0
                 print(f"[DataModule] Auto-detected LOCAL environment: {cpu_count} CPUs, {gpu_count} GPUs -> using {num_workers} workers (single-process)")
         else:
             num_workers = num_workers_config
+            print(f"[DataModule] Using num_workers from config: {num_workers}")
             
         return cls(
             batch_size=train_config.get('batch_size', 256),
