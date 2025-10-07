@@ -1,0 +1,14 @@
+program: scripts/sweep.py
+method: grid
+metric:
+  name: val_mse
+  goal: minimize
+parameters:
+  warmup.shrinkage:
+    values: [0.0, 0.1]
+  warmup.r:
+    values: [64, 128]
+  warmup.freeze_epochs:
+    values: [2, 5]
+  vit_config:
+    value: "configs/anyon/run.yaml"

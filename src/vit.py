@@ -1,5 +1,5 @@
 import os
-from torchmetrics import Accuracy, MeanAbsoluteError, R2Score
+from torchmetrics import Accuracy, MeanAbsoluteError, MeanSquaredError, R2Score
 import lightning as L
 
 from src.basemodule import BaseLightningModule, BaseTrainer, BaseDataModule
@@ -64,6 +64,7 @@ class ViTLModule(BaseLightningModule):
             self.accuracy = Accuracy(task='multiclass', num_classes=config['model']['num_labels'])
         elif self.task_type == 'reg':
             self.mae = MeanAbsoluteError()
+            self.mse = MeanSquaredError()
             self.r2 = R2Score()
 
     def get_model(self, config):
@@ -91,8 +92,10 @@ class ViTLModule(BaseLightningModule):
         elif self.task_type == 'reg':
             preds = outputs.logits.squeeze()
             mae = self.mae(preds, labels)
+            mse = self.mse(preds, labels)
             r2 = self.r2(preds, labels)
             self.log(f'{prefix}_mae', mae, on_step=False, on_epoch=True)
+            self.log(f'{prefix}_mse', mse, on_step=False, on_epoch=True)
             self.log(f'{prefix}_r2', r2, on_step=False, on_epoch=True)
         
         return loss
