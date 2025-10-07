@@ -35,7 +35,7 @@ class PrefilledAttention(nn.Module):
         self.low_rank = low_rank if low_rank is not None else (self.r < input_dim)
         
         # Initialize Q, K, V projections
-        if low_rank:
+        if self.low_rank:
             # Low-rank: Q and K are (input_dim x r)
             self.q_lin = nn.Linear(input_dim, self.r, bias=False)
             self.k_lin = nn.Linear(input_dim, self.r, bias=False)
@@ -48,7 +48,7 @@ class PrefilledAttention(nn.Module):
 
         # Prefill Q and K with PCA/ZCA eigenvectors
         V = eigvecs[:, :self.r].t().contiguous()  # (r, input_dim)
-        if low_rank:
+        if self.low_rank:
             # For low-rank: directly use V^T as weights (r x input_dim)
             self._prefill_linear_lowrank(self.q_lin, V)
             self._prefill_linear_lowrank(self.k_lin, V)
