@@ -305,7 +305,7 @@ def plot_eigenvalue_spectrum(
             
             # Add annotation at intersection point - only show the ratio value
             y_val = remaining_variance[idx].item()
-            ax2.plot(idx, y_val, 'yo', markersize=6, zorder=5)
+            ax2.plot(idx, y_val, 'o', color='gold', markersize=6, zorder=5)
             ax2.annotate(f'({idx}, {ratio})', 
                         xy=(idx, y_val), 
                         xytext=(10, 10), 
@@ -335,6 +335,7 @@ def compute_covariance_stats(
     data: Tensor,
     save_path: Optional[Path] = None,
     wave: Optional[Tensor] = None,
+    src_path: Optional[str | Path] = None,
 ) -> CovarianceStats:
     """Compute covariance statistics from data and optionally save them.
     
@@ -346,6 +347,8 @@ def compute_covariance_stats(
         Path to save computed statistics. If None, uses default location.
     wave : Optional[Tensor]
         Optional wavelength grid for heatmap plotting
+    src_path : Optional[str | Path]
+        Source file path where the data came from (for metadata)
     
     Returns
     -------
@@ -383,8 +386,15 @@ def compute_covariance_stats(
             "eigvals": eigvals.cpu(),
             "eigvecs": eigvecs.cpu(),
         }
+        
+        # Add source path metadata if provided
+        if src_path is not None:
+            payload["src_path"] = str(src_path)
+        
         torch.save(payload, save_path)
         print(f"Saved covariance statistics to {save_path}")
+        if src_path:
+            print(f"  Source data: {src_path}")
         
         # Plot heatmap
         heatmap_path = save_path.with_name(f"{save_path.stem}_heatmap.png")
@@ -402,6 +412,7 @@ def load_or_compute_covariance(
     data: Optional[Tensor] = None,
     save_path: Optional[str | Path] = None,
     wave: Optional[Tensor] = None,
+    src_path: Optional[str | Path] = None,
 ) -> CovarianceStats:
     """Load covariance statistics from file or compute from data.
     
@@ -419,6 +430,8 @@ def load_or_compute_covariance(
         Path to save computed covariance. If None, defaults to cov_path.
     wave : Optional[Tensor]
         Optional wavelength grid for heatmap plotting.
+    src_path : Optional[str | Path]
+        Source file path where the data came from (for metadata).
     
     Returns
     -------
@@ -447,4 +460,4 @@ def load_or_compute_covariance(
         target_path = Path("data/pca/covariance_stats.pt")
     
     print(f"Computing covariance statistics from data...")
-    return compute_covariance_stats(data, save_path=target_path, wave=wave)
+    return compute_covariance_stats(data, save_path=target_path, wave=wave, src_path=src_path)

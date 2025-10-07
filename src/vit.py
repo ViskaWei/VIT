@@ -4,6 +4,7 @@ import lightning as L
 
 from src.basemodule import BaseLightningModule, BaseTrainer, BaseDataModule
 from src.dataloader import ClassSpecDataset, RegSpecDataset, TestDataset
+from src.callbacks import PreprocessorFreezeCallback
 # from src.callbacks_pca_warm import PCAWarmStartCallback, CKAProbeCallback
 
 # Use env override for local W&B run files
@@ -178,6 +179,13 @@ class SpecTrainer():
             monitor_name, monitor_mode, filename_suffix = 'mae', 'min', '{mae:.2f}'
 
         self.trainer = BaseTrainer(config=config.get('train', {}), logger=logger, num_gpus=num_gpus, sweep=sweep)
+        
+        # Add preprocessor freeze callback if configured
+        warmup_cfg = config.get('warmup', {})
+        freeze_epochs = warmup_cfg.get('freeze_epochs', 0)
+        if freeze_epochs > 0:
+            self.trainer.callbacks.append(PreprocessorFreezeCallback(freeze_epochs=freeze_epochs))
+        
         # p = (config.get('pca') or {})
         # if p.get('warm', False):
         #     self.trainer.callbacks.append(PCAWarmStartCallback(

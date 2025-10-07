@@ -1,0 +1,14 @@
+program: scripts/sweep.py
+method: grid
+metric:
+  name: val_mae
+  goal: minimize
+parameters:
+  shrinkage:
+    values: [0.0, 0.1]
+  r:
+    values: [2, 8, 32, 128, 1024, 4096]
+  freeze_epochs:
+    values: [2, 5]
+  vit_config:
+    value: configs/vit.yaml

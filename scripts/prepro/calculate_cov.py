@@ -71,6 +71,7 @@ def calculate_covariance(
         data=flux,
         save_path=output_path,
         wave=wave,
+        src_path=file_path,  # Save the source data path
     )
     
     print(f"Done! Statistics saved to {output_path}")

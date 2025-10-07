@@ -267,11 +267,11 @@ class OptModule():
         self.kwargs = kwargs
         self.opt_fns = {
             'adam': torch.optim.Adam,
+            'adamw': torch.optim.AdamW,
             'sgd': torch.optim.SGD,
             'rmsprop': torch.optim.RMSprop,
             'adadelta': torch.optim.Adadelta,
             'adagrad': torch.optim.Adagrad,
-            'adamw': torch.optim.AdamW,
             'adamax': torch.optim.Adamax,
             'asgd': torch.optim.ASGD,
             'lbfgs': torch.optim.LBFGS,
@@ -280,6 +280,8 @@ class OptModule():
         }
         self.lr_schedulers = {
             'cosine': torch.optim.lr_scheduler.CosineAnnealingLR,
+            'cosineannealing': torch.optim.lr_scheduler.CosineAnnealingLR,
+            'cosineannealinglr': torch.optim.lr_scheduler.CosineAnnealingLR,
             'onecycle': torch.optim.lr_scheduler.OneCycleLR,
             'plateau': torch.optim.lr_scheduler.ReduceLROnPlateau,
         }
@@ -297,14 +299,29 @@ class OptModule():
             OptModule: An instance of the OptModule class
         """
         lr = config.get('lr', 1e-3)
-        opt_type = config.get('type', 'adam')
+        opt_type = config.get('type', 'adam').lower()  # Convert to lowercase
         weight_decay = config.get('weight_decay', 0)
         loss_name = config.get('loss_name', 'train')
         # Align with validation logging in ViTLModule: 'val_{loss_name}_loss'
         monitor_name = f"val_{loss_name}_loss"
         if 'lr_sch' in config:
-            lr_scheduler_name = config['lr_sch']
-            kwargs = {k: v for k, v in config.items() if k not in ['lr', 'type', 'lr_sch','weight_decay', 'loss_name']}
+            lr_scheduler_name = config['lr_sch'].lower()  # Convert to lowercase
+            # Filter out scheduler-specific kwargs - only keep relevant ones based on scheduler type
+            exclude_keys = {'lr', 'type', 'lr_sch', 'weight_decay', 'loss_name', 'factor', 'patience'}
+            kwargs = {k: v for k, v in config.items() if k not in exclude_keys}
+            # Add back specific params if needed by the scheduler
+            if 'cosineannealing' in lr_scheduler_name:
+                # CosineAnnealingLR needs T_max
+                if 'T_max' in config:
+                    kwargs['T_max'] = config['T_max']
+                elif 'ep' in config.get('train', {}):
+                    kwargs['T_max'] = config['train']['ep']
+            elif 'plateau' in lr_scheduler_name:
+                # ReduceLROnPlateau needs factor, patience
+                if 'factor' in config:
+                    kwargs['factor'] = config['factor']
+                if 'patience' in config:
+                    kwargs['patience'] = config['patience']
             return cls(lr=lr, monitor_name=monitor_name, opt_type=opt_type, weight_decay=weight_decay, lr_scheduler_name=lr_scheduler_name, **kwargs)
         return cls(lr=lr, monitor_name=monitor_name, opt_type=opt_type, weight_decay=weight_decay)
 

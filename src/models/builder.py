@@ -3,201 +3,120 @@ from __future__ import annotations
 import torch
 from transformers import ViTConfig
 
-from .embedding import apply_patch_embed_pca
-from .preprocessor import build_preprocessor
-from .vit import GlobalAttnViT, MyViT, PreconditionedViT
+from .attention import PrefilledAttention
+from .preprocessor import LinearPreprocessor, compute_pca_matrix, compute_zca_matrix
+from .specvit import MyViT
 
-__all__ = [
-    "get_model",
-    "get_vit_pretrain_model",
-    "get_pca_config",
-    "get_vit_config",
-]
+__all__ = ["get_model", "get_vit_config"]
 
 
-def _load_pca_stats(pca_path: str):
-    try:
-        loaded = torch.load(pca_path, weights_only=True)
-        tname = type(loaded).__name__
-        print(f"[warmup] Loaded PCA from '{pca_path}' (weights_only=True) type={tname}")
-    except Exception as exc:
-        loaded = torch.load(pca_path)
-        tname = type(loaded).__name__
-        print(
-            f"[warmup] Loaded PCA from '{pca_path}' (fallback weights_only=False) type={tname}; reason: {exc}"
-        )
-    if isinstance(loaded, dict):
-        try:
-            keys = list(loaded.keys())
-            has_mean = "mean" in loaded
-            print(f"[warmup] PCA keys: {keys}; has_mean={has_mean}")
-        except Exception:
-            pass
-        return loaded
-    try:
-        print(f"[warmup] PCA loaded as raw tensor with shape={tuple(loaded.shape)} (stored under key 'V')")
-    except Exception:
-        pass
-    return {"V": loaded}
+def _load_cov_stats(cov_path: str) -> dict:
+    """Load covariance statistics from cov.pt file"""
+    stats = torch.load(cov_path, map_location="cpu", weights_only=True)
+    if not isinstance(stats, dict):
+        raise ValueError(f"Expected dict from {cov_path}, got {type(stats)}")
+    required_keys = {"mean", "cov", "eigvals", "eigvecs"}
+    missing = required_keys - set(stats.keys())
+    if missing:
+        raise ValueError(f"Missing required keys in {cov_path}: {missing}")
+    print(f"[builder] Loaded cov stats from {cov_path}")
+    return stats
 
 
 def get_model(config):
-    warmup_cfg = get_pca_config(config)
+    """Build model with optional preprocessor (ZCA/PCA/Attention)"""
     vit_config = get_vit_config(config)
+    warmup_cfg = config.get("warmup", {})
     loss_name = config.get("loss", {}).get("name", None)
-    freeze_epochs_unified = int(warmup_cfg.get("freeze_qk_epochs", 0) or 0)
-    try:
-        print(
-            f"[warmup] Settings: global={bool(warmup_cfg.get('global', False))}, embed={bool(warmup_cfg.get('embed', False))}, freeze_epochs={freeze_epochs_unified}"
+    
+    preproc_type = warmup_cfg.get("preprocessor", None)  # "zca", "pca", "attention"
+    if preproc_type is None:
+        # No preprocessor
+        model = MyViT(vit_config, loss_name=loss_name, model_name="ViT")
+        print(f"[builder] Created vanilla ViT model")
+        return model
+    
+    # Load covariance statistics
+    cov_path = warmup_cfg.get("cov_path", None)
+    if cov_path is None:
+        raise ValueError(f"preprocessor='{preproc_type}' requires 'cov_path' in warmup config")
+    
+    stats = _load_cov_stats(cov_path)
+    eigvecs = stats["eigvecs"]  # (input_dim, input_dim)
+    input_dim = eigvecs.shape[0]
+    
+    if input_dim != vit_config.image_size:
+        raise ValueError(
+            f"Mismatch: eigvecs dimension {input_dim} != image_size {vit_config.image_size}"
         )
-    except Exception:
-        pass
-
-    preproc_kind = warmup_cfg.get("preprocessor", None)
-    if isinstance(preproc_kind, str):
-        lowered = preproc_kind.lower()
-        if lowered in {"linear", "linear_affine", "feature_linear"}:
-            preproc_kind = "zca_linear"
-        else:
-            preproc_kind = lowered
-    if preproc_kind is None and bool(warmup_cfg.get("global", False)):
-        preproc_kind = "global_attention"
-
-    model = None
-
-    if preproc_kind in {"global_attention", "zca_linear"}:
-        UV = warmup_cfg.get("UV", "V")
+    
+    # Determine initial freeze state (frozen if freeze_epochs > 0)
+    freeze_epochs = warmup_cfg.get("freeze_epochs", 0)
+    initial_freeze = freeze_epochs > 0
+    
+    preprocessor = None
+    model_name = "ViT"
+    
+    if preproc_type == "zca":
+        # ZCA whitening: P @ x where P.T @ cov @ P = I
+        # Supports both full-rank (r=None) and low-rank (r>0) ZCA
+        eigvals = stats["eigvals"]
+        eps = warmup_cfg.get("eps", 1e-5)
         r = warmup_cfg.get("r", None)
-        pca_path = (
-            warmup_cfg.get("stats_path")
-            or warmup_cfg.get("feature_stats_path")
-            or warmup_cfg.get("linear_stats_path")
-            or warmup_cfg.get("global_pca_path", None)
-            or warmup_cfg.get("pca_path", None)
-        )
-        use_input_bias = bool(warmup_cfg.get("bias", False))
-        use_lora = bool(warmup_cfg.get("lora", False))
-        try:
-            print(
-                f"[warmup] Preprocessor='{preproc_kind}', UV={UV}, r={r}, lora={use_lora}, bias={use_input_bias}, pca_path={pca_path}"
-            )
-        except Exception:
-            pass
-        pca_stats = None
-        if pca_path is not None:
-            pca_stats = _load_pca_stats(pca_path)
-
-        if preproc_kind == "global_attention":
-            if (r is not None) and int(r) == 0:
-                pca_stats = None
-            qk_freeze_epochs = int(freeze_epochs_unified)
-            if pca_stats is not None:
-                model = GlobalAttnViT(
-                    vit_config,
-                    pca_stats=pca_stats,
-                    loss_name=loss_name,
-                    r=r,
-                    use_lora=use_lora,
-                    qk_freeze_epochs=qk_freeze_epochs,
-                    UV=UV,
-                    use_input_bias=use_input_bias,
-                )
-                try:
-                    print(f"[global-warmup] Freeze schedule: qk_freeze_epochs={qk_freeze_epochs}")
-                except Exception:
-                    pass
-            else:
-                try:
-                    print(
-                        "[global-warmup] No PCA stats loaded (either no path provided or r==0); using default init for Q/K/V"
-                    )
-                except Exception:
-                    pass
-        elif preproc_kind == "zca_linear":
-            if pca_stats is None:
-                raise ValueError("`zca_linear` preprocessor selected but no PCA/ZCA statistics were provided")
-            allow_rect = bool(warmup_cfg.get("zca_allow_rectangular", False))
-            preprocessor = build_preprocessor(
-                "zca_linear",
-                input_dim=int(vit_config.image_size),
-                pca_stats=pca_stats,
-                uv_key=UV,
-                use_input_bias=use_input_bias,
-                freeze=False,
-                allow_rectangular=allow_rect,
-            )
-            model = PreconditionedViT(
-                vit_config,
-                preprocessor=preprocessor,
-                loss_name=loss_name,
-                model_name="ZCA_ViT",
-                freeze_epochs=int(freeze_epochs_unified),
-            )
-            try:
-                shape = tuple(preprocessor.linear.lin.weight.shape)
-                print(f"[zca-warmup] ZCA preprocessor initialised with weight shape={shape}")
-            except Exception:
-                pass
-
-    if model is None:
-        model = MyViT(vit_config, loss_name=loss_name)
-
-    try:
-        if bool(warmup_cfg.get("embed", False)):
-            pth = warmup_cfg.get("embed_pca_path", "pca_patch.pt")
-            basis_key = str(warmup_cfg.get("UV", "V"))
-            use_mean = bool(warmup_cfg.get("use_pca_mean", False))
-            print(
-                f"[embed-warmup] Config: path='{pth}', basis={basis_key}, use_pca_mean={use_mean}"
-            )
-            apply_patch_embed_pca(model, warmup_cfg)
-            try:
-                model._model_name = f"e{basis_key}{model._model_name}"
-            except Exception:
-                pass
-    except Exception as exc:
-        print(f"[embed-warmup] Skipped due to error: {exc}")
-
-    try:
-        if hasattr(model, "embed_freeze_epochs"):
-            model.embed_freeze_epochs = int(freeze_epochs_unified)
-    except Exception:
-        pass
-
-    try:
-        fz_qk = int(getattr(model, "qk_freeze_epochs", 0) or 0)
-        fz_emb = int(getattr(model, "embed_freeze_epochs", 0) or 0)
-        fz_cfg = int(freeze_epochs_unified or 0)
-        fz_val = max(fz_qk, fz_emb, fz_cfg)
-        if isinstance(getattr(model, "_model_name", None), str):
-            name = model._model_name
-            if "_fz" in name:
-                if fz_val > 0 and "_fz0_" in name:
-                    model._model_name = name.replace("_fz0_", f"_fz{fz_val}_")
-            else:
-                if fz_val > 0:
-                    model._model_name = f"{name}_fz{fz_val}"
-    except Exception:
-        pass
-
+        shrinkage = warmup_cfg.get("shrinkage", 0.0)
+        
+        P = compute_zca_matrix(eigvecs, eigvals, eps=eps, r=r, shrinkage=shrinkage)
+        preprocessor = LinearPreprocessor(P, freeze=initial_freeze)
+        
+        if r is not None:
+            model_name = f"ZCA{r}_ViT"
+            print(f"[builder] Created low-rank ZCA preprocessor with r={r}, eps={eps}, shrinkage={shrinkage}")
+        else:
+            model_name = "ZCA_ViT"
+            print(f"[builder] Created full-rank ZCA preprocessor with eps={eps}, shrinkage={shrinkage}")
+        
+    elif preproc_type == "pca":
+        # PCA projection: V[:, :r].T @ x (low-rank)
+        r = warmup_cfg.get("r", None)
+        if r is None:
+            raise ValueError("preprocessor='pca' requires 'r' in warmup config")
+        P = compute_pca_matrix(eigvecs, r=r)
+        preprocessor = LinearPreprocessor(P, freeze=initial_freeze)
+        model_name = f"PCA{r}_ViT"
+        print(f"[builder] Created PCA preprocessor with r={r}")
+        
+    elif preproc_type == "attention":
+        # Global attention with Q, K initialized from eigenvectors
+        r = warmup_cfg.get("r", None)
+        preprocessor = PrefilledAttention(input_dim=input_dim, eigvecs=eigvecs, r=r)
+        model_name = f"Attn{r if r else 'Full'}_ViT"
+        print(f"[builder] Created Attention preprocessor with r={r}")
+        
+    else:
+        raise ValueError(f"Unknown preprocessor type: '{preproc_type}'")
+    
+    # Log freeze status
+    if freeze_epochs > 0:
+        print(f"[builder] Preprocessor will be frozen for first {freeze_epochs} epochs")
+    
+    model = MyViT(
+        vit_config,
+        loss_name=loss_name,
+        model_name=model_name,
+        preprocessor=preprocessor,
+    )
+    
+    print(f"[builder] Created {model._model_name} with {preproc_type} preprocessor")
     return model
 
 
-def get_vit_pretrain_model(config):
-    vit_config = get_vit_config(config)
-    loss_name = config.get("loss", {}).get("name", None)
-    return MyViT(vit_config, loss_name=loss_name)
-
-
-def get_pca_config(config):
-    return config.get("warmup", {})
-
-
 def get_vit_config(config):
+    """Build ViTConfig from config dict"""
     m = config["model"]
     d = config.get("data", {})
     num_labels = int(m.get("num_labels", 1) or 1)
     task = (m.get("task_type") or m.get("task") or "cls").lower()
+    
     if task in ("reg", "regression"):
         p = d.get("param", None)
         if isinstance(p, str) and len(p) > 0:
@@ -206,10 +125,7 @@ def get_vit_config(config):
                 num_labels = len(plist)
         elif isinstance(p, (list, tuple)) and len(p) > 0:
             num_labels = len(p)
-        try:
-            m["num_labels"] = num_labels
-        except Exception:
-            pass
+        m["num_labels"] = num_labels
 
     return ViTConfig(
         task_type=m["task_type"],
