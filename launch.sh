@@ -3,10 +3,18 @@ set -Eeuo pipefail
 
 # Simple unified launcher for local vs 8-GPU server.
 # Usage:
-#   ./launch.sh [run|test] [-g N] [--save] [--wandb 0|1] [--debug 0|1]
+#   ./launch.sh [run|test|path/to/script.py] [-g N] [-c CONFIG] [--save] [--wandb 0|1] [--debug 0|1]
 # Defaults: mode=run, -g 1, --wandb 1 (enabled), --debug 0
+# Examples:
+#   ./launch.sh run -g 2 --save
+#   ./launch.sh run --config /path/to/custom.yaml -g 4
+#   ./launch.sh test --debug 1 -c configs/anyon/pca.yaml
+#   ./launch.sh ./scripts/train.py -g 4 --wandb 1
+#   ./launch.sh my_script.py --custom-arg value
 
 MODE="run"
+CUSTOM_PY=""
+CUSTOM_CONFIG=""
 GPU_COUNT=1
 GPU_SET=0
 WANDB=1
@@ -17,6 +25,9 @@ if [[ $# -gt 0 ]]; then
   case "$1" in
     run|test)
       MODE="$1"; shift ;;
+    *.py)
+      MODE="custom"
+      CUSTOM_PY="$1"; shift ;;
   esac
 fi
 
@@ -30,6 +41,8 @@ while [[ $# -gt 0 ]]; do
       WANDB="$2"; shift 2 ;;
     -d|--debug)
       DEBUG="$2"; shift 2 ;;
+    -c|--config)
+      CUSTOM_CONFIG="$2"; shift 2 ;;
     --server8)
       MACHINE="server8"; shift ;;
     --local)
@@ -101,21 +114,43 @@ fi
 
 CONFIG_DIR_DEFAULT="${CONFIG_DIR:-$ROOT/configs/anyon}"
 
-if [ "$MODE" = "test" ]; then
-  CONFIG_FILE="$CONFIG_DIR_DEFAULT/test.yaml"
+if [ "$MODE" = "custom" ]; then
+  # Custom Python script mode: run the specified script with EXTRA_ARGS
+  PY="$CUSTOM_PY"
+  echo "[launch] MACHINE=$MACHINE MODE=custom SCRIPT=$PY ROOT=$ROOT GPU_COUNT=$GPU_COUNT CVD=${CUDA_VISIBLE_DEVICES:-unset}"
+  if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
+    python "$PY" "${EXTRA_ARGS[@]}"
+  else
+    python "$PY"
+  fi
+elif [ "$MODE" = "test" ]; then
+  # Use custom config if provided, otherwise use default
+  if [ -n "$CUSTOM_CONFIG" ]; then
+    CONFIG_FILE="$CUSTOM_CONFIG"
+  else
+    CONFIG_FILE="$CONFIG_DIR_DEFAULT/test.yaml"
+  fi
   PY="./scripts/test.py"
   WANDB=0
   DEBUG=1
+  echo "[launch] MACHINE=$MACHINE MODE=$MODE CONFIG=$CONFIG_FILE ROOT=$ROOT GPU_COUNT=$GPU_COUNT WANDB=$WANDB DEBUG=$DEBUG CVD=${CUDA_VISIBLE_DEVICES:-unset}"
+  if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
+    python "$PY" -f "$CONFIG_FILE" -w "$WANDB" -g "$GPU_COUNT" --debug "$DEBUG" "${EXTRA_ARGS[@]}"
+  else
+    python "$PY" -f "$CONFIG_FILE" -w "$WANDB" -g "$GPU_COUNT" --debug "$DEBUG"
+  fi
 else
-  CONFIG_FILE="$CONFIG_DIR_DEFAULT/run.yaml"
+  # Use custom config if provided, otherwise use default
+  if [ -n "$CUSTOM_CONFIG" ]; then
+    CONFIG_FILE="$CUSTOM_CONFIG"
+  else
+    CONFIG_FILE="$CONFIG_DIR_DEFAULT/run.yaml"
+  fi
   PY="./scripts/run.py"
-fi
-
-echo "[launch] MACHINE=$MACHINE MODE=$MODE ROOT=$ROOT GPU_COUNT=$GPU_COUNT WANDB=$WANDB DEBUG=$DEBUG CVD=${CUDA_VISIBLE_DEVICES:-unset}"
-
-# Bash -u can complain on empty arrays; only expand when non-empty
-if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
-  python "$PY" -f "$CONFIG_FILE" -w "$WANDB" -g "$GPU_COUNT" --debug "$DEBUG" "${EXTRA_ARGS[@]}"
-else
-  python "$PY" -f "$CONFIG_FILE" -w "$WANDB" -g "$GPU_COUNT" --debug "$DEBUG"
+  echo "[launch] MACHINE=$MACHINE MODE=$MODE CONFIG=$CONFIG_FILE ROOT=$ROOT GPU_COUNT=$GPU_COUNT WANDB=$WANDB DEBUG=$DEBUG CVD=${CUDA_VISIBLE_DEVICES:-unset}"
+  if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
+    python "$PY" -f "$CONFIG_FILE" -w "$WANDB" -g "$GPU_COUNT" --debug "$DEBUG" "${EXTRA_ARGS[@]}"
+  else
+    python "$PY" -f "$CONFIG_FILE" -w "$WANDB" -g "$GPU_COUNT" --debug "$DEBUG"
+  fi
 fi
