@@ -14,6 +14,11 @@ from src.dataloader import (
     NoiseMixin,
     SingleSpectrumNoiseDataset,
 )
+from src.hardware_utils import (
+    get_num_workers_from_config,
+    select_accelerator_and_devices,
+    get_training_strategy,
+)
 
 #region DATA-----------------------------------------------------------
 # NOTE: Dataset classes now live under src.dataloader.* and are imported above.
@@ -31,52 +36,20 @@ class BaseDataModule(L.LightningDataModule):
 
     @classmethod
     def from_config(cls, dataset_cls=BaseDataset, config: Dict[str, Any]={}):
-        train_config = config.get('train', {})
-        # Accept both 'num_workers' and legacy 'workers'
-        num_workers_config = train_config.get('num_workers', train_config.get('workers', None))
+        """Create DataModule from config with smart worker auto-detection.
         
-        # Allow environment variable override (highest priority)
-        env_num_workers = os.environ.get('NUM_WORKERS')
-        if env_num_workers is not None:
-            num_workers = int(env_num_workers)
-            print(f"[DataModule] Using NUM_WORKERS from environment: {num_workers}")
-        elif num_workers_config is None:
-            # Smart auto-detection: optimize workers based on environment
-            cpu_count = os.cpu_count() or 1
-            gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
-            batch_size = train_config.get('batch_size', 256)
-            
-            # Server detection: many CPUs (>50) and multiple GPUs (>4)
-            is_server = cpu_count > 50 and gpu_count > 4
-            
-            if is_server:
-                # Server: optimize for high I/O throughput
-                # Rule of thumb: 4-8 workers per GPU, but adjusted by batch size
-                # Larger batch sizes need fewer workers (GPU becomes bottleneck)
-                # Smaller batch sizes need more workers (I/O becomes bottleneck)
-                if batch_size >= 512:
-                    # Large batch: GPU-bound, moderate workers
-                    base_workers = min(4 * gpu_count, 32)
-                elif batch_size >= 128:
-                    # Medium batch: balanced
-                    base_workers = min(6 * gpu_count, 48)
-                else:
-                    # Small batch: I/O-bound, more workers
-                    base_workers = min(8 * gpu_count, 63)
-                
-                # Cap at safe limits: leave headroom for system and don't exceed PyTorch Lightning recommendation
-                num_workers = min(base_workers, cpu_count - 1, 63)
-                print(f"[DataModule] Auto-detected SERVER environment: {cpu_count} CPUs, {gpu_count} GPUs, batch_size={batch_size} -> using {num_workers} workers")
-            else:
-                # Local/Mac: use 0 workers to avoid multiprocessing issues on macOS
-                num_workers = 0
-                print(f"[DataModule] Auto-detected LOCAL environment: {cpu_count} CPUs, {gpu_count} GPUs -> using {num_workers} workers (single-process)")
-        else:
-            num_workers = num_workers_config
-            print(f"[DataModule] Using num_workers from config: {num_workers}")
+        Worker detection priority:
+        1. Environment variable NUM_WORKERS (highest)
+        2. Config train.num_workers or train.workers
+        3. Auto-detection based on system resources (see src.worker_utils)
+        """
+        train_config = config.get('train', {})
+        
+        # Use worker_utils for clean, centralized worker detection
+        num_workers, batch_size = get_num_workers_from_config(config, verbose=True)
             
         return cls(
-            batch_size=train_config.get('batch_size', 256),
+            batch_size=batch_size,
             num_workers=num_workers,
             debug=train_config.get('debug', False),
             dataset_cls=dataset_cls,
@@ -194,8 +167,17 @@ class BaseLightningModule(L.LightningModule):
 
 class BaseTrainer(L.Trainer):
     def __init__(self, config, logger=False, num_gpus=None, sweep=False):
+        """Initialize PyTorch Lightning Trainer with smart hardware detection.
+        
+        Args:
+            config: Training configuration dict
+            logger: Optional logger instance
+            num_gpus: Number of GPUs to use (None = auto-detect)
+            sweep: Whether running in sweep mode (affects UI)
+        """
         # Saving behavior: only save when config['save'] is truthy
         enable_checkpointing = bool(config.get('save', False))
+        
         # UI behavior can still depend on sweep mode
         if sweep:
             num_gpus = 1
@@ -204,55 +186,32 @@ class BaseTrainer(L.Trainer):
         else:
             enable_progress_bar = True
             enable_model_summary = True
-        self.acc, self.device0 = self.select_device(num_gpus or config.get('gpus'))
+        
+        # Use hardware_utils for clean device detection
+        self.acc, self.device0 = select_accelerator_and_devices(
+            num_gpus or config.get('gpus')
+        )
+        strategy = get_training_strategy(self.device0)
+        
         epoch = config.get('ep', 10)
         # Allow precision override via config.train.precision, default FP32
         precision = str(config.get('precision', '32'))
+        
         super().__init__(
             max_epochs=epoch,
             devices=self.device0,
             accelerator=self.acc,
-            strategy='ddp' if self.device0 and self.device0 > 1 else 'auto',
+            strategy=strategy,
             logger=logger,
             precision=precision,
             gradient_clip_val=config.get('grad_clip', 0.5),
-            # stochastic_weight_avg=True,
             fast_dev_run=bool(config.get('debug', False)),
             enable_checkpointing=enable_checkpointing,
             enable_progress_bar=enable_progress_bar,
             enable_model_summary=enable_model_summary,
         )
-    def select_device(self, num_gpus: Optional[int] = None):
-        """Return accelerator type and device count based on availability."""
-        if num_gpus and num_gpus > 0:
-            if torch.cuda.is_available():
-                return 'gpu', num_gpus
-            if torch.backends.mps.is_available():
-                return 'mps', 1
-        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-            return 'gpu', torch.cuda.device_count()
-        if torch.backends.mps.is_available():
-            return 'mps', 1
-        return 'cpu', 1
-    
-        #     enable_checkpointing = True
-        #     enable_progress_bar = True
-        #     enable_model_summary = True
-        #     num_gpus = num_gpus or config.get('gpus', None) or torch.cuda.device_count()
-        # epoch = config.get('ep', 10)
-        # super().__init__(
-        #     max_epochs=epoch,
-        #     devices=num_gpus,
-        #     accelerator='gpu',
-        #     strategy='ddp' if num_gpus > 1 else 'auto',
-        #     logger = logger,
-        #     precision = '32',
-        #     gradient_clip_val=config.get('grad_clip', 0.5),
-        #     # stochastic_weight_avg=True,
-        #     fast_dev_run=config.get('debug', False),
-        #     enable_checkpointing=enable_checkpointing,
-        #     enable_progress_bar=enable_progress_bar,
-        #     enable_model_summary=enable_model_summary
+
+#endregion TRAINER------------------------------------------------------------
         # )
         
         

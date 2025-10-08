@@ -355,11 +355,14 @@ class Experiment:
 
         self.lightning_module.sweep = sweep
         if use_wandb:
-            log_model =  config.get('train', {}).get('save', False) 
+            log_model =  config.get('train', {}).get('save', False)
+            # Get optional wandb run name suffix for experiment differentiation
+            run_name_suffix = config.get('wandb_run_suffix', '')
+            run_name = f"{self.lightning_module.model.name}{run_name_suffix}"
             if sweep:
-                logger = L.pytorch.loggers.WandbLogger(config=config, name=self.lightning_module.model.name, log_model=False, save_dir=SAVE_DIR) 
+                logger = L.pytorch.loggers.WandbLogger(config=config, name=run_name, log_model=False, save_dir=SAVE_DIR) 
             else:
-                logger = L.pytorch.loggers.WandbLogger(project = config['project'], config=config, name=self.lightning_module.model.name, log_model=log_model, save_dir=SAVE_DIR)
+                logger = L.pytorch.loggers.WandbLogger(project = config['project'], config=config, name=run_name, log_model=log_model, save_dir=SAVE_DIR)
         else:
             logger = None
         # Choose monitor based on task
