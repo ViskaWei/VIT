@@ -15,24 +15,31 @@ class PrefilledAttention(nn.Module):
     Args:
         input_dim: Input feature dimension D
         eigvecs: Eigenvector matrix for prefilling Q/K
+        eigvals: Optional eigenvalues for scaling (like ZCA whitening)
         r: Rank for Q/K projections. If None, uses eigvecs.shape[1].
            By default, uses low-rank (D x r) if r < D, otherwise full-rank (D x D).
         low_rank: If specified, forces low-rank (True) or full-rank (False) mode.
                   If None (default), automatically uses low-rank when r < D.
+        scale_by_eigvals: If True and eigvals provided, scale by sqrt(eigvals) (default: True)
+        eps: Regularization for eigenvalue scaling (default: 1e-5)
     """
 
     def __init__(
         self, 
         input_dim: int, 
-        eigvecs: torch.Tensor, 
+        eigvecs: torch.Tensor,
+        eigvals: torch.Tensor | None = None,
         r: int | None = None,
-        low_rank: bool | None = None
+        low_rank: bool | None = None,
+        scale_by_eigvals: bool = True,
+        eps: float = 1e-5
     ) -> None:
         super().__init__()
         self.input_dim = input_dim
         self.r = r if r is not None else eigvecs.shape[1]
         # Auto-determine low_rank: use low-rank if r < input_dim (unless explicitly overridden)
         self.low_rank = low_rank if low_rank is not None else (self.r < input_dim)
+        self.scale_by_eigvals = scale_by_eigvals and eigvals is not None
         
         # Initialize Q, K, V projections
         if self.low_rank:
@@ -46,8 +53,15 @@ class PrefilledAttention(nn.Module):
         
         self.v_lin = nn.Linear(input_dim, input_dim, bias=False)
 
-        # Prefill Q and K with PCA/ZCA eigenvectors
+        # Prefill Q and K with eigenvectors (optionally scaled by eigenvalues)
         V = eigvecs[:, :self.r].t().contiguous()  # (r, input_dim)
+        
+        # Apply eigenvalue scaling if requested (like ZCA whitening)
+        if self.scale_by_eigvals:
+            # Scale each eigenvector by 1/sqrt(eigenvalue) for whitening effect
+            # This gives Q and K projections that normalize by variance
+            eigval_scale = torch.rsqrt(eigvals[:self.r] + eps)  # (r,)
+            V = V * eigval_scale.unsqueeze(1)  # (r, input_dim)
         if self.low_rank:
             # For low-rank: directly use V^T as weights (r x input_dim)
             self._prefill_linear_lowrank(self.q_lin, V)

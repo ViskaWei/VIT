@@ -228,6 +228,8 @@ class BaseSpecDataset(MaskMixin, NoiseMixin, BaseDataset):
             )
 
         self.flux = self.flux.clip(min=0.0)
+        # self.flux = self.flux - self.flux.mean(dim=0, keepdim=True)
+        
         self.num_samples = self.flux.shape[0]
         self.num_pixels = len(self.wave)
         if self.error.isnan().any():

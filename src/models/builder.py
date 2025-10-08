@@ -46,7 +46,7 @@ def _build_preprocessor(preproc_type: str, warmup_cfg: dict, stats: dict, input_
     Args:
         preproc_type: Type of preprocessor ("zca", "pca", "attention")
         warmup_cfg: Warmup configuration dict
-        stats: Statistics dict with eigvecs, eigvals
+        stats: Statistics dict with eigvecs, eigvals, mean
         input_dim: Input dimension
         initial_freeze: Whether to freeze initially
     
@@ -54,6 +54,7 @@ def _build_preprocessor(preproc_type: str, warmup_cfg: dict, stats: dict, input_
         Tuple of (preprocessor, output_dim, model_name_prefix, description)
     """
     eigvecs = stats["eigvecs"]
+    mean = stats.get("mean", None)
     r = warmup_cfg.get("r", None)
     fz_suffix = _get_freeze_suffix(warmup_cfg.get("freeze_epochs", 0))
     
@@ -61,32 +62,70 @@ def _build_preprocessor(preproc_type: str, warmup_cfg: dict, stats: dict, input_
         eigvals = stats["eigvals"]
         eps = warmup_cfg.get("eps", 1e-5)
         shrinkage = warmup_cfg.get("shrinkage", 0.0)
+        use_bias = warmup_cfg.get("bias", True)  # Default to True for backward compatibility
         
+        # Compute ZCA matrix with hyperparameters from config
         P = compute_zca_matrix(eigvecs, eigvals, eps=eps, r=r, shrinkage=shrinkage)
-        preprocessor = LinearPreprocessor(P, freeze=initial_freeze)
+        
+        # Compute bias for mean centering: bias = -mean @ P.T
+        # This implements the transformation: y = (x - mean) @ P.T = x @ P.T + bias
+        bias = None
+        if use_bias and mean is not None:
+            bias = -mean @ P.t()
+            print(f"[builder] Computed ZCA bias for centering (shape: {bias.shape})")
+        elif not use_bias:
+            print(f"[builder] ZCA bias disabled (use_bias=False)")
+        
+        preprocessor = LinearPreprocessor(P, bias=bias, freeze=initial_freeze)
         output_dim = P.shape[0]  # Output dimension from ZCA matrix
         
         rank_str = f"ZCA{r}" if r is not None else "ZCA"
-        shrink_str = f"_s{int(shrinkage*10)}"
-        name_prefix = f"{rank_str}_fz{fz_suffix}{shrink_str}"
-        desc = f"{'low-rank' if r else 'full-rank'} ZCA, eps={eps}, shrinkage={shrinkage}"
+        shrink_str = f"_s{int(shrinkage*10)}" if shrinkage > 0 else ""
+        bias_str = "" if use_bias else "_nobias"
+        name_prefix = f"{rank_str}_fz{fz_suffix}{shrink_str}{bias_str}"
+        desc = f"{'low-rank' if r else 'full-rank'} ZCA, eps={eps}, shrinkage={shrinkage}, bias={use_bias}"
         
     elif preproc_type == "pca":
+        use_bias = warmup_cfg.get("bias", True)  # Default to True for backward compatibility
+        
+        # Compute PCA matrix
         P = compute_pca_matrix(eigvecs, r=r)
-        preprocessor = LinearPreprocessor(P, freeze=initial_freeze)
+        
+        # Compute bias for mean centering
+        bias = None
+        if use_bias and mean is not None:
+            bias = -mean @ P.t()
+            print(f"[builder] Computed PCA bias for centering (shape: {bias.shape})")
+        elif not use_bias:
+            print(f"[builder] PCA bias disabled (use_bias=False)")
+        
+        preprocessor = LinearPreprocessor(P, bias=bias, freeze=initial_freeze)
         output_dim = P.shape[0]  # Output dimension from PCA matrix
         
         rank_str = f"PCA{r}" if r is not None else "PCA"
-        name_prefix = f"{rank_str}_fz{fz_suffix}"
-        desc = f"PCA with r={r}" if r else "full-rank PCA"
+        bias_str = "" if use_bias else "_nobias"
+        name_prefix = f"{rank_str}_fz{fz_suffix}{bias_str}"
+        desc = f"PCA with r={r}, bias={use_bias}" if r else f"full-rank PCA, bias={use_bias}"
         
     elif preproc_type == "attention":
-        preprocessor = PrefilledAttention(input_dim=input_dim, eigvecs=eigvecs, r=r)
+        eigvals = stats.get("eigvals", None)
+        eps = warmup_cfg.get("eps", 1e-5)
+        scale_by_eigvals = warmup_cfg.get("scale_by_eigvals", True)
+        
+        preprocessor = PrefilledAttention(
+            input_dim=input_dim, 
+            eigvecs=eigvecs, 
+            eigvals=eigvals,
+            r=r,
+            scale_by_eigvals=scale_by_eigvals,
+            eps=eps
+        )
         output_dim = r if r is not None else input_dim
         
         rank_str = r if r else "Full"
-        name_prefix = f"Attn{rank_str}_fz{fz_suffix}"
-        desc = f"Attention preprocessor with r={r}"
+        scale_suffix = "_scaled" if scale_by_eigvals and eigvals is not None else ""
+        name_prefix = f"Attn{rank_str}{scale_suffix}_fz{fz_suffix}"
+        desc = f"Attention preprocessor with r={r}, scale_by_eigvals={scale_by_eigvals}"
         
     else:
         raise ValueError(f"Unknown preprocessor type: '{preproc_type}'")

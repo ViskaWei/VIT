@@ -91,18 +91,18 @@ def compute_pca_matrix(eigvecs: torch.Tensor, r: int | None = None) -> torch.Ten
 
 
 class LinearPreprocessor(nn.Module):
-    """Linear preprocessing: x -> P @ x
+    """Linear preprocessing: x -> P @ x + bias
     
     Unified class for both ZCA whitening and PCA projection.
-    - ZCA: P is (D, D), output is (batch, D)
-    - PCA: P is (r, D), output is (batch, r)
+    - ZCA: P is (D, D), output is (batch, D), with bias for centering
+    - PCA: P is (r, D), output is (batch, r), with bias for centering
     
     Use compute_zca_matrix() or compute_pca_matrix() to create P.
     """
 
-    def __init__(self, matrix: torch.Tensor, freeze: bool = True) -> None:
+    def __init__(self, matrix: torch.Tensor, bias: torch.Tensor | None = None, freeze: bool = True) -> None:
         super().__init__()
-        self.linear = PrefilledLinear(matrix, freeze=freeze)
+        self.linear = PrefilledLinear(matrix, bias=bias, freeze=freeze)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear(x)

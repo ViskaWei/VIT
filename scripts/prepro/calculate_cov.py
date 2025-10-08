@@ -26,6 +26,9 @@ def calculate_covariance(
 ) -> None:
     """Calculate covariance statistics from HDF5 dataset.
     
+    Only computes basic statistics (mean, cov, eigvals, eigvecs).
+    ZCA bias will be computed dynamically during model building.
+    
     Parameters
     ----------
     file_path : str | Path
@@ -67,11 +70,12 @@ def calculate_covariance(
     
     # Compute and save covariance statistics
     print(f"Computing covariance statistics...")
+    
     stats = compute_covariance_stats(
         data=flux,
         save_path=output_path,
         wave=wave,
-        src_path=file_path,  # Save the source data path
+        src_path=file_path,
     )
     
     print(f"Done! Statistics saved to {output_path}")

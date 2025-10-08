@@ -345,6 +345,9 @@ def compute_covariance_stats(
 ) -> CovarianceStats:
     """Compute covariance statistics from data and optionally save them.
     
+    Only computes basic statistics (mean, cov, eigvals, eigvecs).
+    ZCA bias is computed dynamically in builder.py based on hyperparameters.
+    
     Parameters
     ----------
     data : Tensor
