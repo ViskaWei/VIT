@@ -62,7 +62,7 @@ def _build_preprocessor(preproc_type: str, warmup_cfg: dict, stats: dict, input_
         eigvals = stats["eigvals"]
         eps = warmup_cfg.get("eps", 1e-5)
         shrinkage = warmup_cfg.get("shrinkage", 0.0)
-        use_bias = warmup_cfg.get("bias", True)  # Default to True for backward compatibility
+        use_bias = warmup_cfg.get("bias", True)  # Default to True (performs significantly better)
         
         # Compute ZCA matrix with hyperparameters from config
         P = compute_zca_matrix(eigvecs, eigvals, eps=eps, r=r, shrinkage=shrinkage)
@@ -86,7 +86,7 @@ def _build_preprocessor(preproc_type: str, warmup_cfg: dict, stats: dict, input_
         desc = f"{'low-rank' if r else 'full-rank'} ZCA, eps={eps}, shrinkage={shrinkage}, bias={use_bias}"
         
     elif preproc_type == "pca":
-        use_bias = warmup_cfg.get("bias", True)  # Default to True for backward compatibility
+        use_bias = warmup_cfg.get("bias", True)  # Default to True (performs significantly better)
         
         # Compute PCA matrix
         P = compute_pca_matrix(eigvecs, r=r)

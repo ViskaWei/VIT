@@ -43,8 +43,22 @@ class CovarianceStats:
 
 
 def _sorted_eigh_sym(cov: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+    """Compute eigendecomposition of covariance matrix with numerical safeguards.
+    
+    Ensures symmetry and clips negative eigenvalues (numerical artifacts) to zero.
+    """
     cov_sym = 0.5 * (cov + cov.t())
     eigvals, eigvecs = torch.linalg.eigh(cov_sym)
+    
+    # Clip negative eigenvalues to zero (numerical artifacts from finite precision)
+    # Negative eigenvalues should not exist in covariance matrices (PSD by definition)
+    # num_negative = (eigvals < 0).sum().item()
+    # if num_negative > 0:
+    #     print(f"[preprocessor_utils] Warning: Found {num_negative} negative eigenvalues (numerical artifacts)")
+    #     print(f"  Range: [{eigvals.min():.3e}, {eigvals[eigvals < 0].max():.3e}]")
+    #     print(f"  Clipping to zero for numerical stability")
+    eigvals = torch.clamp(eigvals, min=0.0)
+    
     idx = torch.argsort(eigvals, descending=True)
     return eigvals[idx], eigvecs[:, idx], cov_sym
 
