@@ -270,7 +270,8 @@ class RegressionPlotter:
     Supports multi-output regression (e.g., Teff, log_g, M_H).
     """
     
-    def __init__(self, predictions, labels, param_names=None, logger=None, save_dir='./results/test_plots'):
+    def __init__(self, predictions, labels, param_names=None, logger=None, save_dir='./results/test_plots',
+                 label_norm=None, label_mean=None, label_std=None, label_min=None, label_max=None):
         """
         Args:
             predictions: np.ndarray of shape (n_samples,) or (n_samples, n_outputs)
@@ -278,6 +279,11 @@ class RegressionPlotter:
             param_names: List of parameter names (e.g., ['Teff', 'log_g', 'M_H'])
             logger: Optional W&B logger
             save_dir: Directory to save plots
+            label_norm: Normalization type ('standard', 'zscore', 'minmax', or None)
+            label_mean: Mean values for denormalization (for zscore)
+            label_std: Std values for denormalization (for zscore)
+            label_min: Min values for denormalization (for minmax)
+            label_max: Max values for denormalization (for minmax)
         """
         import os
         self.predictions = np.asarray(predictions)
@@ -285,6 +291,13 @@ class RegressionPlotter:
         self.logger = logger
         self.save_dir = save_dir
         os.makedirs(save_dir, exist_ok=True)
+        
+        # Store normalization parameters
+        self.label_norm = label_norm
+        self.label_mean = label_mean
+        self.label_std = label_std
+        self.label_min = label_min
+        self.label_max = label_max
         
         # Determine if multi-output
         self.is_multi_output = len(self.predictions.shape) > 1 and self.predictions.shape[1] > 1
@@ -299,6 +312,57 @@ class RegressionPlotter:
             if len(self.predictions.shape) == 1:
                 self.predictions = self.predictions.reshape(-1, 1)
                 self.labels = self.labels.reshape(-1, 1)
+        
+        # Denormalize predictions and labels if normalization info provided
+        self._denormalize_data()
+    
+    def _denormalize_data(self):
+        """Denormalize predictions and labels back to original scale"""
+        if self.label_norm is None or self.label_norm not in ('standard', 'zscore', 'minmax'):
+            return
+        
+        eps = 1e-8
+        
+        if self.label_norm in ('standard', 'zscore'):
+            if self.label_mean is not None and self.label_std is not None:
+                # Convert to numpy if torch tensors
+                mean = self.label_mean.cpu().numpy() if hasattr(self.label_mean, 'cpu') else np.asarray(self.label_mean)
+                std = self.label_std.cpu().numpy() if hasattr(self.label_std, 'cpu') else np.asarray(self.label_std)
+                
+                # Ensure shape matches
+                if mean.shape != (self.n_outputs,):
+                    mean = mean.flatten()[:self.n_outputs]
+                if std.shape != (self.n_outputs,):
+                    std = std.flatten()[:self.n_outputs]
+                
+                # Avoid division by zero
+                std = np.where(np.abs(std) < eps, 1.0, std)
+                
+                # Denormalize: x_original = x_normalized * std + mean
+                self.predictions = self.predictions * std + mean
+                self.labels = self.labels * std + mean
+                print(f"[RegressionPlotter] Denormalized with zscore: mean={mean}, std={std}")
+        
+        elif self.label_norm == 'minmax':
+            if self.label_min is not None and self.label_max is not None:
+                # Convert to numpy if torch tensors
+                min_val = self.label_min.cpu().numpy() if hasattr(self.label_min, 'cpu') else np.asarray(self.label_min)
+                max_val = self.label_max.cpu().numpy() if hasattr(self.label_max, 'cpu') else np.asarray(self.label_max)
+                
+                # Ensure shape matches
+                if min_val.shape != (self.n_outputs,):
+                    min_val = min_val.flatten()[:self.n_outputs]
+                if max_val.shape != (self.n_outputs,):
+                    max_val = max_val.flatten()[:self.n_outputs]
+                
+                # Avoid division by zero
+                denom = max_val - min_val
+                denom = np.where(np.abs(denom) < eps, 1.0, denom)
+                
+                # Denormalize: x_original = x_normalized * (max - min) + min
+                self.predictions = self.predictions * denom + min_val
+                self.labels = self.labels * denom + min_val
+                print(f"[RegressionPlotter] Denormalized with minmax: min={min_val}, max={max_val}")
     
     def _save_and_log(self, fig, name):
         """Save figure locally and log to W&B if available"""

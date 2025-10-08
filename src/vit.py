@@ -169,6 +169,28 @@ class ViTLModule(BaseLightningModule):
         n_outputs = all_preds.shape[1] if len(all_preds.shape) > 1 else 1
         param_names = self.config.get('model', {}).get('param_names', ['Teff', 'log_g', 'M_H'][:n_outputs])
         
+        # Get normalization parameters from datamodule's test dataset
+        label_norm = None
+        label_mean = None
+        label_std = None
+        label_min = None
+        label_max = None
+        
+        try:
+            # Access test dataset through trainer.datamodule
+            if hasattr(self.trainer, 'datamodule') and hasattr(self.trainer.datamodule, 'test'):
+                test_dataset = self.trainer.datamodule.test
+                label_norm = getattr(test_dataset, 'label_norm', None)
+                if label_norm in ('standard', 'zscore'):
+                    label_mean = getattr(test_dataset, 'label_mean', None)
+                    label_std = getattr(test_dataset, 'label_std', None)
+                elif label_norm == 'minmax':
+                    label_min = getattr(test_dataset, 'label_min', None)
+                    label_max = getattr(test_dataset, 'label_max', None)
+                print(f"[on_test_epoch_end] Retrieved normalization params: norm={label_norm}")
+        except Exception as e:
+            print(f"[on_test_epoch_end] Could not retrieve normalization params: {e}")
+        
         # Use RegressionPlotter for all visualizations
         from src.plotter import RegressionPlotter
         plotter = RegressionPlotter(
@@ -176,7 +198,12 @@ class ViTLModule(BaseLightningModule):
             labels=all_labels,
             param_names=param_names,
             logger=self.logger,
-            save_dir=PLOT_DIR
+            save_dir=PLOT_DIR,
+            label_norm=label_norm,
+            label_mean=label_mean,
+            label_std=label_std,
+            label_min=label_min,
+            label_max=label_max
         )
         
         # Generate all plots (use quick_mode=True for faster execution)
