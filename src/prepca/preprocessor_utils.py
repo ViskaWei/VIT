@@ -253,8 +253,15 @@ def plot_eigenvalue_spectrum(
     eigvals: Tensor,
     output_path: Path,
     num_samples: Optional[int] = None,
+    eps: float = 1e-5,
+    frontsize: int = 12,
 ) -> None:
-    """Plot eigenvalue spectrum and remaining variance.
+    """Plot eigenvalue spectrum with shrinkage effects and inverse square roots.
+    
+    Creates 3 plots:
+    1. Eigenvalue spectrum with different shrinkage values
+    2. Inverse square root (whitening weights) with different shrinkage values
+    3. Remaining unexplained variance (original plot)
     
     Parameters
     ----------
@@ -264,6 +271,8 @@ def plot_eigenvalue_spectrum(
         Path where plot will be saved
     num_samples : Optional[int]
         Number of samples used (for plot title)
+    eps : float
+        Regularization epsilon for inverse square root computation
     """
     try:
         import matplotlib
@@ -272,67 +281,110 @@ def plot_eigenvalue_spectrum(
 
         eigvals_np = eigvals.detach().cpu().numpy()
         
-        # Create figure with two subplots
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 8))
+        # Create figure with three subplots (increased height for captions)
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 16))
         
-        # Plot 1: Normalized eigenvalue spectrum (log-log)
-        eigval_ratio = eigvals / eigvals.sum()
-        eigval_ratio_np = eigval_ratio.detach().cpu().numpy()
+        # Shrinkage values to compare
+        shrinkage_values = [0.0, 0.01, 0.1, 0.5]
+        colors = ['black', 'blue', 'green', 'red']
         
-        ax1.plot(np.arange(len(eigval_ratio_np)), eigval_ratio_np, 'o-', 
-                color='k', ms=2, lw=0.8, label='Eigenvalue ratio')
+        # Plot 1: Effect of shrinkage on eigenvalues
+        avg = eigvals.mean()
+        x_indices = np.arange(len(eigvals_np))
+        
+        for shrink, color in zip(shrinkage_values, colors):
+            eigvals_hat = (1.0 - shrink) * eigvals + shrink * avg
+            eigvals_hat_np = eigvals_hat.detach().cpu().numpy()
+            
+            ax1.plot(x_indices, eigvals_hat_np, 'o-', 
+                    color=color, ms=2, lw=1.2, alpha=0.7,
+                    label=f'shrinkage={shrink}')
+        
         ax1.set_xscale('log')
         ax1.set_yscale('log')
-        ax1.set_ylabel('Eigenvalue Ratio')
+        ax1.set_ylabel(r'$\hat{\lambda}_i = (1-s)\lambda_i + s \cdot \mu_\lambda)$', fontsize=frontsize)
         ax1.set_xlabel('Component Index')
-        ax1.set_title('Eigenvalue Spectrum (Normalized)')
-
+        title_suffix = f' ({num_samples:,} samples)' if num_samples else ''
+        ax1.set_title(f'Eigenvalue Spectrum with Shrinkage{title_suffix}', fontsize=frontsize + 2)
         ax1.grid(True, alpha=0.3)
-        ax1.legend()
+        ax1.legend(fontsize=frontsize, loc='best')
         
-        # Plot 2: Remaining unexplained variance
+        # Add caption for Plot 1
+        caption1 = (r'Shrinkage regularizes eigenvalues: $\hat{\lambda}_i = (1-s)\lambda_i + s \cdot \mu_\lambda$. '
+                   r'(1) $s=0$ (no shrinkage) preserves original spectrum; (2) $s>0$ pulls small eigenvalues toward the mean, '
+                   r'improving numerical stability and preventing over-whitening of low-variance directions.')
+        ax1.text(0.5, -0.15, caption1, ha='center', va='top', fontsize=frontsize, 
+                transform=ax1.transAxes, wrap=True)
+        
+        # Plot 2: Inverse square root (whitening weights)
+        for shrink, color in zip(shrinkage_values, colors):
+            eigvals_hat = (1.0 - shrink) * eigvals + shrink * avg
+            inv_sqrt = torch.rsqrt(eigvals_hat + eps)
+            inv_sqrt_np = inv_sqrt.detach().cpu().numpy()
+            
+            ax2.plot(x_indices, inv_sqrt_np, 'o-', 
+                    color=color, ms=2, lw=1.2, alpha=0.7,
+                    label=f'shrinkage={shrink}')
+        
+        ax2.set_xscale('log')
+        ax2.set_yscale('log')
+        ax2.set_ylabel(r'$Whitening Weight: \hat{\lambda}_i + \epsilon)^{-1/2}$', fontsize=frontsize)
+        ax2.set_xlabel('Component Index')
+        ax2.set_title('Inverse Square Root (ZCA Whitening Weights)', fontsize=frontsize + 2)
+        ax2.grid(True, alpha=0.3)
+        ax2.legend(fontsize=frontsize, loc='best')
+        
+        # Add caption for Plot 2
+        caption2 = (r'Whitening weights $(\hat{\lambda}_i + \epsilon)^{-1/2}$ amplify each component inversely to its variance. '
+                   r'Higher shrinkage ($s$) reduces extreme amplification of low-variance components, '
+                   r'yielding more balanced whitening. $s=0$: aggressive whitening; $s=0.5$: conservative, near-spherical scaling.')
+        ax2.text(0.5, -0.15, caption2, ha='center', va='top', fontsize=frontsize, 
+                transform=ax2.transAxes, wrap=True)
+        
+        # Plot 3: Remaining unexplained variance (original plot)
         cumsum_ratio = torch.cumsum(eigvals, dim=0) / eigvals.sum()
         remaining_variance = 1 - cumsum_ratio
         remaining_np = remaining_variance.detach().cpu().numpy()
 
-        ax2.plot(remaining_np, 'r-', lw=1.5, label='Remaining Var')
-        ax2.set_yscale('log')
-        ax2.set_ylabel(r'$1 \;- \; \sum^i \lambda_j \quad / \quad \sum^N \lambda_j$')
-        ax2.set_xlabel('i-th component')
+        ax3.plot(remaining_np, 'r-', lw=1.5, label='Remaining Var')
+        ax3.set_yscale('log')
+        ax3.set_ylabel(r'$1 \;- \; \sum^i \lambda_j \quad / \quad \sum^N \lambda_j$', fontsize=frontsize)
+        ax3.set_xlabel('i-th component')
         caption = r'The plot shows $1 - \sum^i \lambda_j \; / \; \sum^N \lambda_j$, i.e., the remaining variance not captured by the first $i$ components. Vertical lines indicate the number of components needed to explain: '
-
+        
         # Mark variance thresholds
         for i in range(1, 4):
             ratio = 10 ** (-i)
             idx = torch.argmin(torch.abs(remaining_variance - ratio)).item()
             explained_pct = 100 - 100 * ratio
-            ax2.axvline(idx, color='b', linestyle='--', alpha=0.7, 
-                       label=f'i={idx} explained {explained_pct:.1f}%')
+            ax3.axvline(idx, color='b', linestyle='--', alpha=0.7, 
+                       label=f'i={idx} ({explained_pct:.1f}%)')
             
-            # Add annotation at intersection point - only show the ratio value
+            # Add annotation at intersection point
             y_val = remaining_variance[idx].item()
-            ax2.plot(idx, y_val, 'o', color='gold', markersize=6, zorder=5)
-            ax2.annotate(f'({idx}, {ratio})', 
+            ax3.plot(idx, y_val, 'o', color='gold', markersize=6, zorder=5)
+            ax3.annotate(f'({idx}, {ratio})', 
                         xy=(idx, y_val), 
                         xytext=(10, 10), 
                         textcoords='offset points',
-                        fontsize=9,
+                        fontsize=frontsize,
                         bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7),
                         arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0', lw=1))
             
             caption += f' {explained_pct:.1f}% ({idx}), '
         
-        title_suffix = f' ({num_samples:,} samples)' if num_samples else ''
-        ax2.set_title(f'Remaining Unexplained Variance{title_suffix}')
-        ax2.grid(True, alpha=0.3)
-        ax2.legend(fontsize=9)
-        # ax2.set_xlim(0.1, len(eigvals_np))
-        ax2.text(0.5, -0.2, caption, ha='center', va='top', fontsize=9, transform=ax2.transAxes, wrap=True)
-        ax2.set_xscale('log')
+        ax3.set_title(f'Remaining Unexplained Variance{title_suffix}', fontsize=frontsize + 2)
+        ax3.grid(True, alpha=0.3)
+        ax3.legend(fontsize=frontsize)
+        ax3.set_xscale('log')
+        ax3.text(0.5, -0.2, caption, ha='center', va='top', fontsize=frontsize, transform=ax3.transAxes, wrap=True)
+        
         fig.tight_layout()
         fig.savefig(output_path, dpi=200, bbox_inches='tight')
         plt.close(fig)
         print(f"Saved eigenvalue spectrum plot at {output_path}")
+        print(f"  Shrinkage values: {shrinkage_values}")
+        print(f"  Epsilon: {eps}")
     except Exception as exc:
         warnings.warn(f"Failed to save eigenvalue spectrum at {output_path}: {exc}")
 
