@@ -18,7 +18,7 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_DIR="$2"
             shift 2
             ;;
-        --gpu_ids)
+        -g|--gpus)
             GPU_IDS="$2"
             shift 2
             ;;
@@ -32,12 +32,12 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --config PATH       Config file (default: exp/zca_bias/zca_bias_comparison.yaml)"
             echo "  --output_dir PATH   Output directory (default: results_zca_bias_comparison_TIMESTAMP)"
-            echo "  --gpu_ids IDS       Comma-separated GPU IDs (default: 0,1)"
+            echo "  -g, --gpus IDS      Comma-separated GPU IDs (default: 0,1)"
             echo "  --seed NUM          Random seed (default: 42)"
             echo "  --help              Show this help message"
             echo ""
             echo "Example:"
-            echo "  $0 --gpu_ids 4,5 --seed 123"
+            echo "  $0 -g 4,5 --seed 123"
             exit 0
             ;;
         *)

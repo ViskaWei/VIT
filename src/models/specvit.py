@@ -25,6 +25,7 @@ class MyViT(ViTPreTrainedModel, BaseModel):
         loss_name: str = "",
         model_name: str = "ViT",
         preprocessor: nn.Module | None = None,
+        full_config: dict = None,
     ) -> None:
         ViTPreTrainedModel.__init__(self, config)
         self.config = config
@@ -55,7 +56,7 @@ class MyViT(ViTPreTrainedModel, BaseModel):
 
         self.init_weights()
         
-        self._model_name = build_model_name(config, model_name)
+        self._model_name = build_model_name(config, model_name, full_config=full_config)
         self._loss_name = loss_name
     
     def _replace_attention_with_rope(self, config: ViTConfig) -> None:

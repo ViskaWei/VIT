@@ -145,7 +145,7 @@ def get_model(config):
     # Handle None, null, or string "None"
     if preproc_type is None or str(preproc_type).lower() in ("none", "null"):
         vit_config = get_vit_config(config)
-        model = MyViT(vit_config, loss_name=loss_name, model_name="ViT")
+        model = MyViT(vit_config, loss_name=loss_name, model_name="ViT", full_config=config)
         print(f"[builder] Created vanilla ViT model")
         return model
     
@@ -190,6 +190,7 @@ def get_model(config):
         loss_name=loss_name,
         model_name=f"{name_prefix}_ViT",
         preprocessor=preprocessor,
+        full_config=config,
     )
     
     print(f"[builder] Created {model._model_name} with {preproc_type} preprocessor")
