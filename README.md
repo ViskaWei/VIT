@@ -1,98 +1,64 @@
-# VIT Project
+# Minimal ViT Launcher
 
-Vision Transformer (ViT) models for spectral data using PyTorch Lightning and Hugging Face's transformers.
+This repo now keeps only the pieces required to train, evaluate, search for a learning rate, and run W&B sweeps. Everything routes through `launch.sh`.
 
-## 🚀 Quick Start
+## Commands
 
-```bash
-# Initialize environment
-source init.sh
+| Command | What it does | Defaults |
+|---------|--------------|----------|
+| `./launch.sh run` | Train using `scripts/run.py` | config: `configs/exp/att_clp/baseline.yaml`, W&B on |
+| `./launch.sh test` | Evaluate a checkpoint via `scripts/test.py` | expects `--ckpt best|last|/path.ckpt` |
+| `./launch.sh lr` | Two-stage LR + scheduler sweep via `src/opt/parallel_sweep.py` | config: `configs/config.yaml` |
+| `./launch.sh sweep` | Create a W&B sweep and launch local agents | requires `-c sweep.yaml` |
 
-# Run 4 basic experiments (vit, att, pca, zpca)
-./run_suite.sh basic
+### Common flags
 
-# Or run a single experiment
-./launch.sh run --config configs/vit.yaml -g 0
+- `-c, --config PATH` — override the config file (sweep mode expects a sweep YAML).
+- `-g, --gpu VALUE` — for `run`/`test` supply a count (e.g. `-g 2`). For `lr`/`sweep` supply GPU ids (e.g. `-g 0,1,2,3`).
+- `-w, --wandb {0,1}` — toggle W&B logging for `run`/`test`.
+- `--save` — enable checkpoint saving during `run`.
+- `--ckpt PATH` — checkpoint path (or `best`/`last`) for `test`.
+- `--dry-run` — preview LR sweep without launching jobs.
+- `-e/--entity`, `-p/--project`, `--count` — W&B sweep options.
+
+## Configuration
+
+- `configs/exp/att_clp/baseline.yaml` — fast baseline for sanity checks.
+- `configs/config.yaml` — consolidated master config with every tunable field documented.
+
+## W&B Sweep flow
+
+```
+# Create sweep + launch agents on GPUs 0 and 1
+./launch.sh sweep -c configs/sweep.yaml -e my-entity -p my-project -g 0,1
 ```
 
-## 📖 Documentation
+The script creates the sweep via the W&B CLI, prints the sweep ID, and spawns one agent per GPU.
 
-- **[USAGE_GUIDE.md](USAGE_GUIDE.md)** - 完整的运行指南和命令参考
-- **[BIAS_QUICK_START.md](BIAS_QUICK_START.md)** - ZCA Bias对比实验快速指南
-- **[configs/exp/README.md](configs/exp/README.md)** - 实验配置说明
-- **[test/README.md](test/README.md)** - Test suite documentation and guidelines
-- **[TEST_CLEANUP_SUMMARY.md](TEST_CLEANUP_SUMMARY.md)** - Recent test cleanup summary
+## Learning Rate search
 
-## 🧪 Testing
-
-Run the test suite:
-```bash
-pytest                    # Run all tests
-pytest -m unit           # Run only unit tests
-pytest -m "not slow"     # Skip slow tests
-pytest --cov=src         # Run with coverage
+```
+./launch.sh lr -c configs/config.yaml -g 0,1,2,3
 ```
 
-See [test/README.md](test/README.md) for detailed testing documentation.
+This runs a 7-value LR sweep, grabs the best LR, then compares schedulers using that LR. Results live in `opt_runs/sweep/`.
 
-## Repository Overview
+## Testing
 
-The project centers on building and training Vision Transformer (ViT)–style models for spectral data using PyTorch Lightning and Hugging Face's transformers. It is organized as follows:pository Overview
-The project centers on building and training Vision Transformer (ViT)–style models for spectral data using PyTorch Lightning and Hugging Face’s transformers. It is organized as follows:
-
-| Path       | Purpose                                                                                                                      |
-| ---------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `src/`     | Core Python modules: dataset abstractions, model definitions, training loops, plotting utilities, and miscellaneous helpers. |
-| `scripts/` | CLI entry points for launching experiments.                                                                                  |
-| `configs/` | YAML configuration files describing model hyperparameters, data paths, optimization, etc.                                    |
-| `evals/`   | Jupyter notebooks and other evaluation artifacts.                                                                            |
-
-# Key Components
-
-## 1. Training Workflow
-
-* **Entry point:** `scripts/run.py` parses command-line arguments, loads a YAML config, and instantiates `Experiment`.
-* **Experiment** (in `src/vit.py` or `src/blindspot.py`) combines a `LightningModule`, a `DataModule`, and a `Trainer`:
-
-  * Builds model (`ViTLModule`) and dataset (`ViTDataModule`).
-  * Optionally sets up Weights & Biases logging.
-  * Executes training and testing.
-
-## 2. Data Handling
-
-* **`basemodule.py`** defines reusable mixins and base classes:
-
-  * `Configurable` extracts constructor arguments from a config dictionary.
-  * `BaseDataset`, `BaseDataModule` manage I/O from HDF5 files, masking/noise routines, and train/val/test splits.
-  * `NoiseMixin`, `MaskMixin` encapsulate noise injection and masking logic.
-* **`blindspot.py`** and **`vit.py`** implement dataset subclasses tailored to particular experiments.
-
-## 3. Models
-
-* **`model.py`** wraps Hugging Face’s `ViTForImageClassification`:
-
-  * Custom patch embeddings (`MyCNN1DPatchEmbeddings`, `MyWindowPatchEmbeddings`) for 1-D spectra.
-  * `MyEmbeddings` supports different positional encodings.
-* **`vit.py`** constructs a `ViTLModule` that:
-
-  * Uses the custom `MyViT` model.
-  * Logs losses/metrics (`Accuracy` from `torchmetrics`) during train/val/test.
-
-## 4. Training Logic
-
-* **`train.py`** (alternative CLI) shows a full command-line interface for experimentation without config files.
-* **`BaseLightningModule`** & **`BaseTrainer`** (in `basemodule.py`) wrap PyTorch Lightning conveniences (checkpointing, early stopping, optimizer/scheduler setup via `OptModule`).
-
-## 5. Plotting & Evaluation
-
-* **`plotter.py`** produces spectral plots, SNR comparisons, and equivalent-width analyses using `matplotlib`/`seaborn`.
-* **`utils.py`** offers a large collection of helpers for spectral line manipulation, noise generation, SVD denoising, and various physical conversions.
-
-## Data
-
-Data generated by Laszlo & Balzsh:
 ```
-/datascope/subaru/user/swei20/data/bosz50000/z0/train_1k
-
-./bin/sim model bosz pfs --threads 24 --config /datascope/subaru/user/swei20/data/bosz50000/z0/train.json /datascope/subaru/user/swei20/data/bosz50000/z0/inst_pfs_mr.json --out /datascope/subaru/user/swei20/data/bosz50000/z0/test_1k --sample-count 1000 --seeing 0.5 1.5
+./launch.sh test --ckpt checkpoints/latest.ckpt
 ```
+
+Runs `scripts/test.py`, which simply loads the config, attaches the datamodule, and calls Lightning's `Trainer.test`.
+
+## Run
+
+```
+./launch.sh run --save -w 1
+```
+
+Trains with the baseline config (or the file provided via `-c`).
+
+---
+
+Everything else (old helper scripts, cached results, etc.) has been removed to keep the repo focused on these four entry points.
