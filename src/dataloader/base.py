@@ -7,6 +7,7 @@ in ``src.basemodule``.
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -217,7 +218,12 @@ class BaseSpecDataset(MaskMixin, NoiseMixin, BaseDataset):
 
     def load_data(self, stage: Optional[str] = None) -> None:
         load_path, num_samples = self.get_path_and_samples(stage)
-        print("loading data from", load_path, num_samples)
+        print(f"[{stage or 'train'}] loading data from {load_path}, num_samples={num_samples}")
+        
+        # Check if file exists
+        if not os.path.exists(load_path):
+            raise FileNotFoundError(f"[{stage or 'train'}] Data file not found: {load_path}")
+        
         with h5py.File(load_path, "r") as f:
             self.wave = torch.tensor(f["spectrumdataset/wave"][()], dtype=torch.float32)
             self.flux = torch.tensor(

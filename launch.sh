@@ -79,10 +79,8 @@ if [ "$MACHINE" = "server8" ]; then
   export ROOT="$ROOT_SERVER8"
   # If user explicitly passed -g on server, treat it as GPU ID selector
   if [ "$GPU_SET" = "1" ]; then
-    # Only set when not already constrained by caller
-    if [ -z "${CUDA_VISIBLE_DEVICES+x}" ]; then
-      export CUDA_VISIBLE_DEVICES="$GPU_COUNT"
-    fi
+    # Override CUDA_VISIBLE_DEVICES when user explicitly specifies GPU
+    export CUDA_VISIBLE_DEVICES="$GPU_COUNT"
     GPU_COUNT=1
   else
     export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"

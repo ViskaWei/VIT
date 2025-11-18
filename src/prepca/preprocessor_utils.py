@@ -14,7 +14,6 @@ import warnings
 import numpy as np
 import torch
 
-from evals.zca_util import zca_report as compute_zca_report
 from src.utils import load_cov_stats as load_cov_stats_base
 
 Tensor = torch.Tensor
@@ -172,16 +171,10 @@ def compute_zca_diagnostics(
     matrix: Tensor,
     shrinkage: float,
 ) -> Optional[Dict[str, float]]:
-    if flux is None:
-        return None
-    report = compute_zca_report(
-        flux,
-        mean,
-        cov_for_report,
-        matrix,
-        float(shrinkage),
-    )
-    return {key: float(value) for key, value in report.items()}
+    """Compute ZCA diagnostics (disabled - evals module removed)."""
+    # This function is disabled as evals module has been removed
+    # If needed, implement diagnostics directly here
+    return None
 
 
 def _sym_limits_from_percentiles(A: np.ndarray, clip: float = 1.0) -> Tuple[float, float]:

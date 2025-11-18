@@ -201,18 +201,30 @@ def get_vit_config(config):
     """Build ViTConfig from config dict"""
     m = config["model"]
     d = config.get("data", {})
-    num_labels = int(m.get("num_labels", 1) or 1)
     task = (m.get("task_type") or m.get("task") or "cls").lower()
     
+    # For regression tasks, always derive num_labels from data.param
     if task in ("reg", "regression"):
         p = d.get("param", None)
+        num_labels = 1  # default
+        
         if isinstance(p, str) and len(p) > 0:
             plist = [x.strip() for x in p.split(",") if x.strip()]
             if len(plist) >= 1:
                 num_labels = len(plist)
         elif isinstance(p, (list, tuple)) and len(p) > 0:
             num_labels = len(p)
+        
+        # Warn if there's a conflict between config and derived value
+        config_num_labels = m.get("num_labels")
+        if config_num_labels is not None and int(config_num_labels) != num_labels:
+            print(f"Warning: model.num_labels={config_num_labels} conflicts with data.param (which implies {num_labels} labels). Using {num_labels} from data.param.")
+        
+        # Always use the value derived from data.param
         m["num_labels"] = num_labels
+    else:
+        # For classification, use the config value or default to 1
+        num_labels = int(m.get("num_labels", 1) or 1)
     
     # Position encoding configuration (default: None - no position encoding)
     pos_encoding_type = m.get("pos_encoding_type", None)

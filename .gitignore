@@ -169,6 +169,7 @@ experiments/
 wandb
 lightning_logs
 results/
+results*
 *spec100k.h5
 /home/viska/SirenSpec/data/spec100k.h5
 
@@ -182,3 +183,7 @@ data
 *.vscode
 
 *.codex-env
+*zca_report
+
+*test*
+test

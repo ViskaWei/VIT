@@ -4,8 +4,8 @@ from torchmetrics import Accuracy, MeanAbsoluteError, MeanSquaredError, R2Score
 import lightning as L
 
 from src.basemodule import BaseLightningModule, BaseTrainer, BaseDataModule
-from src.dataloader import ClassSpecDataset, RegSpecDataset, TestDataset
-from src.callbacks import PreprocessorFreezeCallback
+from src.dataloader import ClassSpecDataset, RegSpecDataset
+from src.prepca.callbacks import PreprocessorFreezeCallback
 # from src.callbacks_pca_warm import PCAWarmStartCallback, CKAProbeCallback
 
 # Use env override for local W&B run files
@@ -32,15 +32,13 @@ class ViTDataModule(BaseDataModule):
     def from_config(cls, config, test_data=False):
         task = _normalize_task(config)
         if test_data:
-            dataset_cls = TestDataset
-            print('Using Test Dataset')
+            raise ValueError("test_data=True is not supported. TestDataset has been removed.")
+        if task == 'reg':
+            dataset_cls = RegSpecDataset
+            print('Using RegSpec Dataset (regression)')
         else:
-            if task == 'reg':
-                dataset_cls = RegSpecDataset
-                print('Using RegSpec Dataset (regression)')
-            else:
-                dataset_cls = ClassSpecDataset
-                print('Using ClassSpec Dataset (classification)')
+            dataset_cls = ClassSpecDataset
+            print('Using ClassSpec Dataset (classification)')
         return super().from_config(dataset_cls=dataset_cls, config=config)
 
     def setup_test_dataset(self, stage):
@@ -67,10 +65,12 @@ class ViTLModule(BaseLightningModule):
         self.noise_level = config.get('noise', {}).get('noise_level', 0.0)
         if self.task_type == 'cls':
             self.accuracy = Accuracy(task='multiclass', num_classes=config['model']['num_labels'])
+            self.monitor_metric = 'acc'
         elif self.task_type == 'reg':
             self.mae = MeanAbsoluteError()
             self.mse = MeanSquaredError()
             self.r2 = R2Score()
+            self.monitor_metric = 'mae'
 
     def get_model(self, config):
         return get_model(config)
@@ -125,7 +125,66 @@ class ViTLModule(BaseLightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        return self._shared_eval_step(batch, 'val')
+        loss = self._shared_eval_step(batch, 'val')
+        
+        # Collect predictions for epoch-level metrics (regression only)
+        if self.task_type == 'reg' and hasattr(self, 'val_dict'):
+            # Extract labels from batch
+            labels = batch[-1]  # Last element is always labels
+            # Get predictions (already computed in _shared_eval_step, cached in metrics)
+            # Use mae.update's internal state to avoid re-computing
+            preds = self.mae.compute()  # This won't work, need to pass through
+            # Actually, let's just recompute once here to get preds
+            if len(batch) == 4:
+                noisy, flux, error, labels = batch
+                inputs = noisy if self.noise_level > 0 else flux
+            else:
+                flux, error, labels = batch
+                inputs = flux
+            with torch.no_grad():
+                outputs = self.forward(inputs, labels, loss_only=False)
+                preds = outputs.logits.squeeze()
+            self.val_dict['preds'].append(preds.detach().cpu())
+            self.val_dict['labels'].append(labels.detach().cpu())
+        
+        return loss
+    
+    def on_validation_start(self):
+        """Initialize collection for epoch-level metrics"""
+        if self.task_type == 'reg':
+            self.val_dict = {'preds': [], 'labels': []}
+    
+    def on_validation_epoch_end(self):
+        """Calculate epoch-level regression metrics"""
+        if self.task_type != 'reg' or not hasattr(self, 'val_dict') or not self.val_dict['preds']:
+            return
+        
+        import numpy as np
+        all_preds = torch.cat(self.val_dict['preds'], dim=0).numpy()
+        all_labels = torch.cat(self.val_dict['labels'], dim=0).numpy()
+        
+        # Ensure 2D shape
+        if all_preds.ndim == 1:
+            all_preds = all_preds.reshape(-1, 1)
+            all_labels = all_labels.reshape(-1, 1)
+        
+        # Calculate for each output
+        for i in range(all_preds.shape[1]):
+            residuals = all_preds[:, i] - all_labels[:, i]
+            bias_median = float(np.median(residuals))
+            p90 = float(np.percentile(np.abs(residuals), 90))
+            
+            # Linear fit: pred = a + b * label
+            coeffs = np.polyfit(all_labels[:, i], all_preds[:, i], 1)
+            beta, a = float(coeffs[0]), float(coeffs[1])
+            
+            # Log (single output uses simple names)
+            suffix = '' if all_preds.shape[1] == 1 else f'_{i}'
+            self.log(f'val_bias_median{suffix}', bias_median, on_epoch=True)
+            self.log(f'val_p90{suffix}', p90, on_epoch=True)
+            self.log(f'val_beta{suffix}', beta, on_epoch=True)
+        
+        self.val_dict = {'preds': [], 'labels': []}
 
     def on_test_start(self):
         """Initialize dict for collecting test predictions and labels (regression only)"""
@@ -191,14 +250,33 @@ class ViTLModule(BaseLightningModule):
         except Exception as e:
             print(f"[on_test_epoch_end] Could not retrieve normalization params: {e}")
         
+        # Determine if we should save locally
+        # If wandb is enabled, don't save locally. Otherwise, always save locally.
+        has_logger = self.logger is not None and hasattr(self.logger, 'experiment')
+        save_enabled = self.config.get('train', {}).get('save', False)
+        
+        # If wandb is enabled, use temp directory (will be cleaned up)
+        # If wandb is not enabled, always save locally regardless of save_enabled flag
+        import tempfile
+        if has_logger:
+            # Wandb enabled: use temp directory, plots will only go to wandb
+            plot_dir = tempfile.mkdtemp(prefix="test_plots_")
+            print(f"[on_test_epoch_end] Using temp directory for plots (will upload to WandB only): {plot_dir}")
+            should_save_local = False
+        else:
+            # Wandb not enabled: always save locally
+            plot_dir = PLOT_DIR
+            should_save_local = True
+            print(f"[on_test_epoch_end] Saving plots locally to: {plot_dir}")
+        
         # Use RegressionPlotter for all visualizations
-        from src.plotter import RegressionPlotter
+        from src.viz import RegressionPlotter
         plotter = RegressionPlotter(
             predictions=all_preds,
             labels=all_labels,
             param_names=param_names,
             logger=self.logger,
-            save_dir=PLOT_DIR,
+            save_dir=plot_dir,
             label_norm=label_norm,
             label_mean=label_mean,
             label_std=label_std,
@@ -209,6 +287,12 @@ class ViTLModule(BaseLightningModule):
         # Generate all plots (use quick_mode=True for faster execution)
         quick_mode = self.config.get('plotting', {}).get('quick_mode', False)
         plotter.generate_all_plots(quick_mode=quick_mode)
+        
+        # Cleanup temporary directory if used (only when wandb is enabled)
+        if not should_save_local:
+            import shutil
+            shutil.rmtree(plot_dir, ignore_errors=True)
+            print(f"[on_test_epoch_end] Cleaned up temporary test plots")
 
     def on_train_start(self):
         # Log explained variance (if GlobalAttnViT with PCA stats and r provided)
@@ -281,62 +365,66 @@ class SpecTrainer():
         patience = 100 if sweep else 500
         task_type = _normalize_task(config)
         if task_type == 'cls':
-            monitor_name, monitor_mode, filename_suffix = 'acc', 'max', '{acc_valid:.0f}'
+            monitor_name, monitor_mode = 'acc', 'max'
         else:
-            monitor_name, monitor_mode, filename_suffix = 'mae', 'min', '{mae:.2f}'
+            monitor_name, monitor_mode = 'mae', 'min'
 
         self.trainer = BaseTrainer(config=config.get('train', {}), logger=logger, num_gpus=num_gpus, sweep=sweep)
         
-        # Add preprocessor freeze callback if configured
-        # freeze_epochs > 0: freeze for N epochs then unfreeze
-        # freeze_epochs = -1: permanently frozen
-        # freeze_epochs = 0: never frozen (no callback needed)
+        # Visualization callbacks
+        viz_cfg = config.get('viz') or config.get('advanced_visualization') or {}
+        save_enabled = config.get('train', {}).get('save', False)
+        from src.viz import create_viz_callbacks
+        self.trainer.callbacks.extend(create_viz_callbacks(viz_cfg, save_enabled=save_enabled))
+        
+        # Preprocessor freeze callback
         warmup_cfg = config.get('warmup') or {}
         freeze_epochs = warmup_cfg.get('freeze_epochs', 0)
-        if freeze_epochs != 0:  # Add callback if not 0 (either temporary or permanent freeze)
+        if freeze_epochs != 0:
             self.trainer.callbacks.append(PreprocessorFreezeCallback(freeze_epochs=freeze_epochs))
         
-        # p = (config.get('pca') or {})
-        # if p.get('warm', False):
-        #     self.trainer.callbacks.append(PCAWarmStartCallback(
-        #         attn_module_path=p.get('attn_path', 'model.vit.encoder.layer.0.attention'),
-        #         r=int(p.get('r', 32)),
-        #         robust=bool(p.get('robust', False)),
-        #         kernel=p.get('kernel', None),
-        #         nystrom_m=int(p.get('nystrom_m', 256)),
-        #         whiten=bool(p.get('whiten', False)),
-        #         trigger_epoch=0,
-        #     ))
-        # if p.get('cka', False):
-        #     self.trainer.callbacks.append(CKAProbeCallback(
-        #         attn_module_path=p.get('attn_path', 'model.vit.encoder.layer.0.attention'),
-        #         r=int(p.get('r', 32)),
-        #         every_n_epochs=int(p.get('cka_every', 1)),
-        #         kernel=p.get('cka_kernel', 'linear'),
-        #     ))
-        
-        # Add checkpointing only when saving is enabled
-        if (config.get('train', {}).get('save', False)):
-            # Build filename template using the actual monitored metric name
+        # Checkpoint callback: only when --save is set
+        if save_enabled:
+            has_wandb = logger is not None
             metric_key = f"val_{monitor_name}"
             filename_tmpl = '{epoch}-' + '{' + f'{metric_key}:.4f' + '}'
-            # Ensure dir exists (ModelCheckpoint will also create it, but this is explicit)
-            os.makedirs(CKPT_DIR, exist_ok=True)
-            checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(
-                dirpath=CKPT_DIR,
-                filename=filename_tmpl,
-                save_top_k=1,
-                monitor=metric_key,
-                mode=monitor_mode,
-                save_last=True,
-            )
-            self.trainer.callbacks.append(checkpoint_callback)
             
-        earlystopping_callback = L.pytorch.callbacks.EarlyStopping(monitor=f'val_{monitor_name}', patience=patience, mode=monitor_mode, divergence_threshold=None,)
+            if has_wandb:
+                # With wandb: save to wandb artifacts (handled by log_model in WandbLogger)
+                # Still need ModelCheckpoint for proper saving, but Lightning will sync to wandb
+                checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(
+                    dirpath=None,  # Let Lightning use default temp dir, wandb will upload
+                    filename=filename_tmpl,
+                    save_top_k=1,
+                    monitor=metric_key,
+                    mode=monitor_mode,
+                    save_last=True,
+                )
+            else:
+                # Without wandb: save to local CKPT_DIR
+                os.makedirs(CKPT_DIR, exist_ok=True)
+                checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(
+                    dirpath=CKPT_DIR,
+                    filename=filename_tmpl,
+                    save_top_k=1,
+                    monitor=metric_key,
+                    mode=monitor_mode,
+                    save_last=True,
+                )
+            self.trainer.callbacks.append(checkpoint_callback)
+        
+        # Early stopping
+        earlystopping_callback = L.pytorch.callbacks.EarlyStopping(
+            monitor=f'val_{monitor_name}',
+            patience=patience,
+            mode=monitor_mode,
+            divergence_threshold=None,
+            check_on_train_epoch_end=False,
+            strict=False,
+        )
         self.trainer.callbacks.append(earlystopping_callback)
-        # For regression, add original-scale plotting callback at test time
-        # if task_type == 'reg':
-        #     self.trainer.callbacks.append(OrigScalePredPlotCallback(save_dir=SAVE_PATH))
+        
+        # Test trainer
         self.test_trainer = L.Trainer(
             devices=self.trainer.device0,
             accelerator=self.trainer.acc,
@@ -345,47 +433,33 @@ class SpecTrainer():
             enable_progress_bar=False,
             enable_model_summary=False,
         )
-        # self.test_trainer = L.Trainer(devices=1, accelerator='gpu', logger=logger,  enable_checkpointing=False, enable_progress_bar=False, enable_model_summary=False)
 
 class Experiment:
     def __init__(self, config, use_wandb=False, num_gpus=None, sweep=False, ckpt_path=None, test_data=False):
-        # self.lightning_module = BlindspotLModule(config=config)
         self.lightning_module = ViTLModule(config=config)
         self.data_module = ViTDataModule.from_config(config, test_data=test_data)
-
         self.lightning_module.sweep = sweep
+        
+        # Wandb logger setup
         if use_wandb:
-            log_model =  config.get('train', {}).get('save', False)
-            # Get optional wandb run name suffix for experiment differentiation
+            save_enabled = config.get('train', {}).get('save', False)
             run_name_suffix = config.get('wandb_run_suffix', '')
             run_name = f"{self.lightning_module.model.name}{run_name_suffix}"
-            if sweep:
-                logger = L.pytorch.loggers.WandbLogger(config=config, name=run_name, log_model=False, save_dir=SAVE_DIR) 
-            else:
-                logger = L.pytorch.loggers.WandbLogger(project = config['project'], config=config, name=run_name, log_model=log_model, save_dir=SAVE_DIR)
+            
+            # log_model=True means save to wandb artifacts (only when save=True)
+            logger = L.pytorch.loggers.WandbLogger(
+                project=config['project'],
+                config=config,
+                name=run_name,
+                log_model=save_enabled,  # Save to wandb artifacts if --save -w 1
+                save_dir=SAVE_DIR if not sweep else SAVE_DIR
+            )
         else:
             logger = None
-        # Choose monitor based on task
-        self.t = SpecTrainer(config = config, logger = logger, num_gpus=num_gpus, sweep=sweep)
+        
+        self.t = SpecTrainer(config=config, logger=logger, num_gpus=num_gpus, sweep=sweep)
         self.ckpt_path = ckpt_path
     
     def run(self):
         self.t.trainer.fit(self.lightning_module, datamodule=self.data_module, ckpt_path=self.ckpt_path)
         self.t.test_trainer.test(self.lightning_module, datamodule=self.data_module)
-    
-if __name__ == '__main__':
-    # config = {
-    #     'loss': {'name': 'E1'},
-    #     'data': {'file_path': './tests/spec/test_dataset.h5', 'num_samples': 10,},
-    #     'mask': {'mask_ratio': 0.9, },
-    #     'noise': {'noise_level': 2.0, },
-    #     'train': {'ep': 2},
-    #     'model': {'input_sigma': True, 'blindspot': True, 'num_layers': 3, 'embed_dim': 3, 'kernel_size': 3}
-    # }
-    from src.utils import load_config
-
-# /home/swei20/VIT/configs/vit.yaml
-    config  = load_config('./configs/vit.yaml')
-    exp = Experiment(config, use_wandb=True, num_gpus=1, test_data=True)
-    exp.run()
-    print('Experiment completed successfully!')

@@ -9,7 +9,6 @@ from src.dataloader.base import (
     SingleSpectrumNoiseDataset,
 )
 from src.dataloader.spec_datasets import ClassSpecDataset, RegSpecDataset
-from src.dataloader.test_dataset import TestDataset
 
 __all__ = [
     "Configurable",
@@ -20,5 +19,4 @@ __all__ = [
     "SingleSpectrumNoiseDataset",
     "ClassSpecDataset",
     "RegSpecDataset",
-    "TestDataset",
 ]
