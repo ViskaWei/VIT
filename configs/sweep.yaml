@@ -1,0 +1,21 @@
+program: scripts/sweep.py
+method: grid
+metric:
+  name: val_mae
+  goal: minimize
+
+parameters:
+  vit_config:
+    value: configs/exp/logg/base.yaml
+  model.patch_size:
+    values: [8, 16, 32, 64, 128, 256]
+  model.hidden_size:
+    values: [32, 128]
+  model.num_hidden_layers:
+    values: [3, 4, 6]
+  model.num_attention_heads:
+    values: [2, 4, 8]
+  model.stride_size:
+    values: [1, 2, 4, 8, 16, 32]
+  model.proj_fn:
+    values: ['SW', 'CNN']

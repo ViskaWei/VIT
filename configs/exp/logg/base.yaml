@@ -1,0 +1,64 @@
+# ============================================
+# Baseline 配置
+# ============================================
+# 基础实验配置，用于快速测试和可视化
+# 完整参数说明请参考: configs/config.yaml
+
+project: 'vit-logg'
+
+model:
+  name: vit
+  task_type: reg
+  image_size: 4096    
+  patch_size: 32
+  hidden_size: 32
+  num_hidden_layers: 3
+  num_attention_heads: 2
+  stride_size: 32
+  proj_fn: 'SW'
+
+train:
+  batch_size: 64
+  ep: 2
+  debug: 0
+  save: false
+
+loss: 
+  name: 'mae'
+
+opt:
+  type: 'AdamW'
+  lr: 0.001
+  lr_sch: plateau
+  factor: 0.8
+  patience: 10
+
+data:
+  file_path: "${TRAIN_DIR}/dataset.h5"
+  val_path:  "${VAL_DIR}/dataset.h5"
+  test_path: "${TEST_DIR}/dataset.h5"
+  num_samples: 10000
+  num_test_samples: 512
+  param: log_g
+  label_norm: 'minmax'
+
+noise:
+  noise_level: 0
+
+# viz:
+#   enable: true
+#   save_dir: './results/viz'
+#   log_every_n_epochs: 1
+#   num_viz_samples: 256
+#   max_batches_to_track: 5
+#   sample_rate: 0.15
+#   create_distribution_gif: true
+#   create_activation_gif: true
+#   create_attention_gif: true
+#   create_collinearity_gif: true
+#   embedding_method: 'umap'
+#   gif_duration: 500
+#   activation_layer_names: null
+
+# plotting:
+#   quick_mode: false
